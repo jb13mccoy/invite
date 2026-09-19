@@ -127,8 +127,11 @@ button:disabled{opacity:.42;cursor:not-allowed}
 
 .qrrow{display:flex;gap:16px;align-items:flex-start;margin-top:14px}
 @media (max-width:520px){.qrrow{flex-direction:column}}
+/* Never let CSS scale this down. A QR resampled to under ~3px per module
+   turns to mush under a phone camera, so the canvas is shown at its own
+   pixel size and only ever shrinks as a last resort on tiny screens. */
 canvas#qr{border:1px solid var(--line);border-radius:var(--r-sm);background:#fff;
-  padding:6px;width:132px;height:132px;flex:none}
+  padding:6px;flex:none;max-width:100%;height:auto;image-rendering:pixelated}
 
 table.diag{width:100%;border-collapse:collapse;font-size:12.5px}
 table.diag td{padding:7px 2px;border-bottom:1px solid var(--line-soft);vertical-align:top}
@@ -767,17 +770,25 @@ var QR = (function(){
       for(i=0;i<size;i++) for(j=0;j<size;j++)
         if(!rv[i][j] && maskFn(mk,i,j)) g[i][j]^=1;
 
+      /* Format information, both copies. The row/column order here is the
+         whole ballgame: get it transposed and every finder still looks
+         perfect while no scanner on earth can read the code, because the
+         error-correction level and mask bits come back as noise.
+         Verified against a third-party encoder, cell by cell. */
       var fmt=FMT_L[mk];
       for(i=0;i<15;i++){
         var fb=(fmt>>i)&1;
-        if(i<6)       g[8][i]=fb;
-        else if(i===6) g[8][7]=fb;
-        else if(i===7) g[8][8]=fb;
-        else if(i===8) g[7][8]=fb;
-        else           g[14-i][8]=fb;
 
-        if(i<8) g[size-1-i][8]=fb;
-        else    g[8][size-15+i]=fb;
+        /* copy 1, wrapped around the top-left finder */
+        if(i<6)        g[i][8]=fb;      /* bits 0-5  climb column 8   */
+        else if(i===6) g[7][8]=fb;      /* skipping the timing row    */
+        else if(i===7) g[8][8]=fb;      /* the corner                 */
+        else if(i===8) g[8][7]=fb;      /* then left along row 8      */
+        else           g[8][14-i]=fb;   /* bits 9-14 to (8,5)..(8,0)  */
+
+        /* copy 2, split between the top-right and the bottom-left */
+        if(i<8) g[8][size-1-i]=fb;      /* bits 0-7  leftward along row 8 */
+        else    g[size-15+i][8]=fb;     /* bits 8-14 down column 8        */
       }
       g[size-8][8]=1;
 
@@ -1439,7 +1450,7 @@ function drawQR(){
     $("qrstat").textContent="Build a link and a QR code appears here for the printed card.";
     $("b-qr").disabled=true; return;
   }
-  var q=QR.draw(cv,link,264);
+  var q=QR.draw(cv,link,276);   /* 276 = 4px per module at version 11 */
   if(!q){
     $("qrstat").innerHTML="<span class='no'>That link is "+link.length+" characters, past the 858 byte ceiling.</span> "+
       "Shorten the link base or put it through a link shortener.";

@@ -1,0 +1,1861 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Invitation Engine</title>
+<!--
+  INVITATION ENGINE v1
+  ====================
+  One state object -> many renderers -> many outputs.
+
+      S (plain JSON)
+        |-- render()       -> the live card on screen + print
+        |-- paint(ctx,t)   -> canvas painter -> PNG (share + 300dpi) + MP4
+        |-- pack(S)        -> URL #fragment -> a shareable link, no server
+        |-- exportHTML()   -> a standalone .html file with S baked in
+        |-- icsText(S)     -> calendar file + Google Calendar link
+        |-- QR.draw(link)  -> QR code for the printed card
+
+  Why the #fragment matters: everything after "#" is never transmitted to a
+  web server. Host this ONE file once and every customer's invitation is just
+  a different #fragment on the same URL. No per-customer hosting, no database,
+  no accounts, and the child's name and address never touch a server.
+
+  DESIGN NOTE - why there is a glyph table further down:
+  the card is drawn twice, once as HTML for the live page and once onto a
+  canvas for the PNG and the video. Ornaments and background motifs are stored
+  once as SVG path strings and handed to BOTH renderers - to <path d> in the
+  DOM and to Path2D on the canvas - so the two can never drift apart.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Baloo+2:wght@400;600;700&family=Cinzel+Decorative:wght@400;700&family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=Fredoka:wght@400;600;700&family=Inter:wght@400;500;600;700&family=Karla:wght@400;600;700&family=Nunito:wght@400;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap">
+<style>
+/* ============================================================== chrome
+   The editor around the invitation. Warm neutrals so that every colour the
+   eye notices belongs to the card itself.                                */
+:root{
+  --bg:#F7F6F3; --surface:#FFFFFF; --sunken:#FBFAF8;
+  --line:#E5E1D9; --line-soft:#F0EDE6;
+  --ink:#1B1916; --ink-2:#494339; --muted:#7E7768;
+  --accent:#963F5B; --accent-soft:#FBF1F4; --accent-line:#E7CCD4;
+  --ok:#2C7A50; --no:#AF372E;
+  --r:14px; --r-sm:9px;
+  --shadow:0 1px 2px rgba(27,25,22,.045), 0 10px 30px rgba(27,25,22,.06);
+  --shadow-sm:0 1px 2px rgba(27,25,22,.05);
+  --ui:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--ui);
+  font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+
+.masthead{border-bottom:1px solid var(--line);background:var(--surface)}
+.masthead .in{max-width:1240px;margin:0 auto;padding:16px 22px;
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mark{width:30px;height:30px;border-radius:8px;background:var(--accent);color:#fff;
+  display:grid;place-items:center;font-weight:700;font-size:14px;letter-spacing:-.02em;flex:none}
+.masthead h1{font-size:16px;font-weight:600;margin:0;letter-spacing:-.01em}
+.masthead p{margin:0;font-size:13px;color:var(--muted)}
+.pill{margin-left:auto;font-size:11.5px;font-weight:600;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--accent);background:var(--accent-soft);
+  border:1px solid var(--accent-line);padding:4px 10px;border-radius:99px}
+
+.wrap{max-width:1240px;margin:0 auto;padding:22px 22px 90px;
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(0,460px);gap:26px;align-items:start}
+@media (max-width:980px){
+  .wrap{grid-template-columns:minmax(0,1fr);padding:16px 16px 70px;gap:18px}
+  #stage{order:-1}
+}
+
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:20px 22px;box-shadow:var(--shadow-sm);margin-bottom:16px}
+.panel > h2{font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);margin:0 0 4px}
+.panel > .hint{margin:0 0 14px;font-size:13px;color:var(--muted)}
+
+label{display:block;font-size:12.5px;font-weight:500;color:var(--ink-2);margin:12px 0 5px}
+label:first-child{margin-top:0}
+input,select,textarea{width:100%;padding:9px 11px;border:1px solid var(--line);
+  border-radius:var(--r-sm);font:inherit;font-size:14px;background:var(--sunken);color:var(--ink);
+  transition:border-color .13s,box-shadow .13s,background .13s}
+input:focus,select:focus,textarea:focus{outline:none;background:var(--surface);
+  border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+textarea{resize:vertical;min-height:58px;line-height:1.5}
+select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' fill='none' stroke='%237E7768' stroke-width='1.6' stroke-linecap='round'/></svg>");
+  background-repeat:no-repeat;background-position:right 12px center;padding-right:34px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+@media (max-width:520px){.row3{grid-template-columns:1fr}}
+
+.seg{display:flex;gap:0;border:1px solid var(--line);border-radius:var(--r-sm);
+  overflow:hidden;background:var(--sunken);margin-top:5px}
+.seg label{flex:1;margin:0;text-align:center;font-size:13px;font-weight:500;
+  padding:9px 6px;cursor:pointer;color:var(--ink-2);border-right:1px solid var(--line);
+  transition:background .13s,color .13s}
+.seg label:last-child{border-right:0}
+.seg input{position:absolute;opacity:0;width:0;height:0}
+.seg input:checked + span{color:#fff}
+.seg label:has(input:checked){background:var(--accent);color:#fff}
+
+button{font:inherit;font-size:13.5px;font-weight:500;padding:9px 15px;border-radius:var(--r-sm);
+  cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink);
+  transition:background .13s,border-color .13s,transform .06s}
+button:hover:not(:disabled){background:var(--sunken);border-color:#D5CFC4}
+button:active:not(:disabled){transform:translateY(1px)}
+button.go{background:var(--ink);color:#fff;border-color:var(--ink)}
+button.go:hover:not(:disabled){background:#000}
+button.accent{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.accent:hover:not(:disabled){background:#7F3550}
+button:disabled{opacity:.42;cursor:not-allowed}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+
+/* output tiles */
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px}
+@media (max-width:520px){.tiles{grid-template-columns:1fr}}
+.tile{border:1px solid var(--line);border-radius:var(--r-sm);padding:13px 14px;background:var(--sunken)}
+.tile b{display:block;font-size:13.5px;font-weight:600;margin-bottom:2px}
+.tile span{display:block;font-size:12px;color:var(--muted);line-height:1.45;margin-bottom:10px}
+.tile button{width:100%}
+
+#linkout{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;
+  word-break:break-all;min-height:76px;line-height:1.5}
+.note{font-size:12.5px;color:var(--muted);margin:8px 0 0;line-height:1.5}
+.note b{color:var(--ink-2);font-weight:600}
+
+.qrrow{display:flex;gap:16px;align-items:flex-start;margin-top:14px}
+@media (max-width:520px){.qrrow{flex-direction:column}}
+canvas#qr{border:1px solid var(--line);border-radius:var(--r-sm);background:#fff;
+  padding:6px;width:132px;height:132px;flex:none}
+
+table.diag{width:100%;border-collapse:collapse;font-size:12.5px}
+table.diag td{padding:7px 2px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+table.diag tr:last-child td{border-bottom:0}
+table.diag td:first-child{color:var(--ink-2);width:52%;padding-right:12px}
+.ok{color:var(--ok);font-weight:600}
+.no{color:var(--no);font-weight:600}
+
+#toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,8px);background:var(--ink);
+  color:#fff;padding:11px 18px;border-radius:99px;font-size:13.5px;font-weight:500;z-index:200;
+  opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;box-shadow:var(--shadow)}
+#toast.on{opacity:1;transform:translate(-50%,0)}
+#recbar{display:none;margin-top:12px}
+#recbar.on{display:block}
+#recbar .lbl{font-size:12.5px;color:var(--muted);margin-bottom:6px}
+progress{width:100%;height:6px;border:0;border-radius:99px;background:var(--line);
+  -webkit-appearance:none;appearance:none}
+progress::-webkit-progress-bar{background:var(--line);border-radius:99px}
+progress::-webkit-progress-value{background:var(--accent);border-radius:99px}
+progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
+
+/* animation preview overlay */
+#playwrap{position:fixed;inset:0;background:rgba(20,18,16,.72);backdrop-filter:blur(3px);
+  z-index:300;display:none;place-items:center;padding:24px}
+#playwrap.on{display:grid}
+#playwrap canvas{max-width:min(420px,86vw);max-height:84vh;width:auto;height:auto;
+  border-radius:12px;box-shadow:0 24px 60px rgba(0,0,0,.4)}
+#playwrap .close{position:absolute;top:18px;right:20px;background:rgba(255,255,255,.14);
+  border:1px solid rgba(255,255,255,.28);color:#fff}
+#playwrap .close:hover{background:rgba(255,255,255,.24)}
+
+
+/* ------------------------------------------------- the parent side */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:4px}
+@media (max-width:520px){.stats{grid-template-columns:1fr 1fr}}
+.stat{border:1px solid var(--line);border-radius:var(--r-sm);padding:12px 13px;background:var(--sunken)}
+.stat b{display:block;font-size:25px;font-weight:600;line-height:1.1;letter-spacing:-.02em}
+.stat span{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+.stat.yes b{color:var(--ok)} .stat.no b{color:var(--no)} .stat.maybe b{color:#9A6B12}
+#host-table{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.gtable{width:100%;min-width:330px;border-collapse:collapse;font-size:13.5px;margin-top:2px}
+.gtable th{text-align:left;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--muted);padding:0 8px 7px 0;border-bottom:1px solid var(--line)}
+.gtable td{padding:9px 8px 9px 0;border-bottom:1px solid var(--line-soft);vertical-align:top}
+.gtable tr:last-child td{border-bottom:0}
+.gtable .nm{font-weight:600}
+.gtable .sub{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+.tag-y,.tag-n,.tag-m{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;white-space:nowrap}
+.tag-y{background:#E8F4EC;color:var(--ok)} .tag-n{background:#FBECEB;color:var(--no)}
+.tag-m{background:#FBF2E0;color:#9A6B12}
+.gtable button{padding:4px 9px;font-size:12px}
+.empty{color:var(--muted);font-size:13.5px;padding:18px 0;text-align:center}
+.allergy{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.allergy span{font-size:12px;background:#FBF2E0;color:#8A5E10;border:1px solid #F0DFB8;
+  padding:3px 9px;border-radius:99px;overflow-wrap:anywhere}
+
+/* ============================================================ the card
+   Tokens are written by JS from the active theme. The paper panel, the
+   hairline inset and the ornament all mirror what paint() draws.         */
+.card{
+  --ink:#3A2255; --paper:#fff; --a1:#F0407F; --a2:#2E9BE0; --a3:#FFC233;
+  --bg1:#FFF0F6; --bg2:#F0EEFF; --bg3:#E8F6FF;
+  --ink-rule:rgba(58,34,85,.26); --ink-soft:rgba(58,34,85,.62); --ink-dim:rgba(58,34,85,.78);
+  --display:Georgia,serif; --body:system-ui,sans-serif;
+  position:relative;border-radius:18px;overflow:hidden;
+  background:linear-gradient(158deg,var(--bg1) 0%,var(--bg2) 54%,var(--bg3) 100%);
+  box-shadow:var(--shadow);font-family:var(--body);color:var(--ink);
+}
+.card .motif{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.card .paper{
+  position:relative;margin:20px;background:var(--paper);border-radius:11px;
+  padding:34px 26px 30px;box-shadow:0 2px 12px rgba(0,0,0,.09);
+}
+.card .paper::after{content:"";position:absolute;inset:11px;border:1px solid var(--ink-rule);
+  border-radius:5px;pointer-events:none}
+.card .eyebrow{margin:0 0 14px;font-size:10.5px;font-weight:700;letter-spacing:.24em;
+  text-transform:uppercase;color:var(--a1);text-align:center}
+.card .name{font-family:var(--display);font-weight:var(--display-weight,700);font-size:clamp(38px,11vw,58px);
+  line-height:1;margin:0;text-align:center;letter-spacing:-.01em;overflow-wrap:anywhere}
+.card .head{font-family:var(--display);font-weight:var(--head-weight,400);font-size:clamp(20px,5.6vw,27px);
+  line-height:1.16;margin:7px 0 0;text-align:center;color:var(--a1)}
+.card .orn{display:flex;align-items:center;justify-content:center;gap:11px;margin:19px 0}
+.card .orn i{height:1px;background:var(--ink-rule);flex:1;max-width:74px}
+.card .orn svg{width:15px;height:15px;flex:none;fill:var(--a1)}
+.card .tag{margin:0 0 20px;text-align:center;font-size:14.5px;line-height:1.5;color:var(--ink-soft)}
+.card .rows{display:grid;gap:13px}
+.card .r{display:grid;grid-template-columns:62px 1fr;gap:14px;align-items:baseline}
+.card .k{font-size:9.5px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;
+  color:var(--a2);padding-top:3px}
+.card .v{font-size:15px;font-weight:600;line-height:1.35}
+.card .v small{display:block;font-weight:400;font-size:13px;color:var(--ink-soft);margin-top:2px}
+.card .v a{color:var(--a2);text-decoration:none;border-bottom:1px solid currentColor;
+  font-size:13px;font-weight:500;display:inline-block;margin-top:4px}
+
+#countdown{display:flex;gap:9px;justify-content:center;margin:0 20px 4px;list-style:none;padding:0}
+#countdown li{background:var(--paper);border-radius:9px;padding:8px 4px;text-align:center;
+  flex:1;max-width:76px;box-shadow:0 1px 6px rgba(0,0,0,.08)}
+#countdown b{display:block;font-family:var(--display);font-weight:var(--display-weight,700);font-size:20px;line-height:1.1}
+#countdown span{font-size:8.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-soft)}
+#countdown li.wide{max-width:none;flex:0 1 auto;padding:9px 18px}
+#countdown li.wide b{font-size:14px}
+
+#guestActions{margin:18px 20px 22px}
+#guestActions .btns{margin-top:0;gap:9px}
+#guestActions .btns > *{
+  background:var(--paper);border:1px solid var(--ink-rule);color:var(--ink);
+  text-decoration:none;padding:10px 15px;border-radius:9px;font-weight:600;font-size:13.5px;
+  font-family:var(--body);cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+#guestActions .btns > *:hover{border-color:var(--ink-soft);background:var(--paper)}
+#rsvpForm{margin-top:12px;background:var(--paper);border-radius:11px;padding:16px;
+  box-shadow:0 2px 10px rgba(0,0,0,.07)}
+#rsvpForm label{color:var(--ink-soft);font-family:var(--body)}
+#rsvpForm input,#rsvpForm select,#rsvpForm textarea{background:transparent;border-color:var(--ink-rule);color:var(--ink)}
+.hide{display:none !important}
+
+@media print{
+  .masthead,.noprint,#editor,#countdown,#guestActions,#toast,#playwrap{display:none !important}
+  body{background:#fff}
+  .wrap{display:block;padding:0;max-width:none}
+  #stage{position:static}
+  .card{box-shadow:none;border-radius:0;width:5in;height:7in;margin:0 auto;
+    -webkit-print-color-adjust:exact;print-color-adjust:exact}
+  @page{size:5in 7in;margin:0}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead noprint">
+  <div class="in">
+    <div class="mark">IE</div>
+    <div>
+      <h1>Invitation Engine</h1>
+      <p>One file. Edit, share a link, export a card or a video.</p>
+    </div>
+    <span class="pill">v1</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ===================== EDITOR (host only; removed for guests) ===================== -->
+<div id="editor">
+
+  <section class="panel">
+    <h2>Design</h2>
+    <p class="hint">A theme is a row in a table, not new code. New looks drop straight in.</p>
+    <label for="f-theme">Theme</label>
+    <select id="f-theme"></select>
+  </section>
+
+  <section class="panel">
+    <h2>Wording</h2>
+    <label for="f-eyebrow">Line above the name</label>
+    <input id="f-eyebrow" type="text">
+    <label for="f-name">Name</label>
+    <input id="f-name" type="text">
+    <label for="f-head">Headline</label>
+    <input id="f-head" type="text">
+    <label for="f-tag">Tagline</label>
+    <input id="f-tag" type="text">
+  </section>
+
+  <section class="panel">
+    <h2>When and where</h2>
+    <div class="row2">
+      <div><label for="f-start">Starts</label><input id="f-start" type="datetime-local"></div>
+      <div><label for="f-dur">Runs (minutes)</label><input id="f-dur" type="number" min="15" step="15"></div>
+    </div>
+    <label for="f-venue">Place</label>
+    <input id="f-venue" type="text">
+    <label for="f-city">Town or city</label>
+    <input id="f-city" type="text">
+    <label for="f-notes">Extra note</label>
+    <textarea id="f-notes" placeholder="What to wear, what to bring, anything else"></textarea>
+  </section>
+
+  <section class="panel">
+    <h2>RSVP</h2>
+    <p class="hint">Text and email need no setup and work with no connection. A form endpoint
+       gives you a tally instead.</p>
+    <div class="row2">
+      <div><label for="f-host">Reply to</label><input id="f-host" type="text"></div>
+      <div><label for="f-by">Reply by</label><input id="f-by" type="date"></div>
+    </div>
+    <div class="row2">
+      <div><label for="f-phone">Phone</label><input id="f-phone" type="text"></div>
+      <div><label for="f-email">Email</label><input id="f-email" type="text"></div>
+    </div>
+    <label style="margin-top:14px">How replies reach you</label>
+    <div class="seg">
+      <label><input type="radio" name="rsvp" value="text" id="rv-text"><span>Text</span></label>
+      <label><input type="radio" name="rsvp" value="email" id="rv-email"><span>Email</span></label>
+      <label><input type="radio" name="rsvp" value="form" id="rv-form"><span>Form</span></label>
+    </div>
+    <div id="formwrap" class="hide">
+      <label for="f-form">Form endpoint</label>
+      <input id="f-form" type="text" placeholder="https://formspree.io/f/xxxxxxx">
+      <p class="note">Formspree, Basin and Getform all have free tiers that accept this directly.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Share link</h2>
+    <p class="hint">The invitation travels inside the link. Everything after the # is never
+       sent to a server, so no guest list ever leaves your phone.</p>
+    <label for="f-base">Link base</label>
+    <input id="f-base" type="text" placeholder="https://yourname.github.io/invite/">
+    <div class="btns">
+      <button class="accent" id="b-link" type="button">Build link</button>
+      <button id="b-copy" type="button">Copy</button>
+      <button id="b-open" type="button">Open as a guest</button>
+      <button id="b-host" type="button">Open the guest list</button>
+    </div>
+    <label for="linkout" style="margin-top:14px">Your link</label>
+    <textarea id="linkout" readonly spellcheck="false"></textarea>
+    <p class="note" id="linkstat">Press <b>Build link</b> to generate it.</p>
+    <div class="qrrow">
+      <canvas id="qr" width="132" height="132"></canvas>
+      <div style="flex:1;min-width:0">
+        <p class="note" id="qrstat" style="margin-top:0"></p>
+        <div class="btns"><button id="b-qr" type="button" disabled>Download QR</button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Outputs</h2>
+    <div class="tiles">
+      <div class="tile"><b>Share image</b><span>1080 &times; 1350 PNG, sized for a text message or a story.</span>
+        <button class="go" id="b-png" type="button">Download PNG</button></div>
+      <div class="tile"><b>Print file</b><span>5 &times; 7 inches at 300 dpi, ready for a print shop.</span>
+        <button id="b-print-png" type="button">Download print PNG</button></div>
+      <div class="tile"><b>Video invitation</b><span>An animated reveal, recorded live. MP4 where the browser allows it.</span>
+        <button id="b-video" type="button">Record video</button></div>
+      <div class="tile"><b>Standalone page</b><span>One .html file with everything baked in. Works with no connection.</span>
+        <button id="b-html" type="button">Download .html</button></div>
+      <div class="tile"><b>Calendar</b><span>An .ics file, or add it straight to Google Calendar.</span>
+        <div class="btns" style="margin-top:0">
+          <button id="b-ics" type="button">.ics</button>
+          <button id="b-gcal" type="button">Google</button></div></div>
+      <div class="tile"><b>Paper</b><span>Prints at 5 &times; 7 with the trim size already set.</span>
+        <button id="b-print" type="button">Print or save PDF</button></div>
+    </div>
+    <div id="recbar">
+      <div class="lbl" id="recmsg">Recording</div>
+      <progress id="recprog" max="100" value="0"></progress>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>What this browser can do</h2>
+    <p class="hint">Live feature detection, not a promise. Anything red falls back to something
+       that works rather than failing.</p>
+    <table class="diag" id="diag"></table>
+  </section>
+</div>
+
+
+<!-- ======================= PARENT SIDE (guest list) ======================= -->
+<div id="hostview" class="hide">
+
+  <section class="panel">
+    <h2>Guest list</h2>
+    <p class="hint" id="host-event"></p>
+    <div class="stats" id="host-stats"></div>
+    <div class="allergy" id="host-allergy"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Log a reply</h2>
+    <p class="hint">Paste the message a guest sent you. If it carries a reply code the row
+       fills itself; if they just texted normally, type it in and carry on.</p>
+    <label for="h-paste">Their message</label>
+    <textarea id="h-paste" placeholder="Paste the whole text here"></textarea>
+    <div class="btns"><button class="accent" id="h-read" type="button">Read it</button></div>
+
+    <div class="row3" style="margin-top:16px">
+      <div><label for="h-name">Name</label><input id="h-name" type="text"></div>
+      <div><label for="h-count">How many</label><input id="h-count" type="number" min="0" value="1"></div>
+      <div><label for="h-status">Coming</label>
+        <select id="h-status"><option value="Y">Yes</option><option value="M">Maybe</option><option value="N">No</option></select></div>
+    </div>
+    <div class="row2">
+      <div><label for="h-allergy">Allergies</label><input id="h-allergy" type="text"></div>
+      <div><label for="h-note">Note</label><input id="h-note" type="text"></div>
+    </div>
+    <div class="btns">
+      <button class="go" id="h-add" type="button">Add to the list</button>
+      <button id="h-cancel" type="button" class="hide">Cancel edit</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Who replied</h2>
+    <div id="host-table"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Keep a copy</h2>
+    <p class="hint">This list is held in this browser on this device. Nobody else can see it,
+       not even from the same link &mdash; but clearing your browser data clears it too, and it
+       will not appear on your other phone. Take a backup if that matters.</p>
+    <div class="btns">
+      <button id="h-csv" type="button">Download CSV</button>
+      <button id="h-summary" type="button">Copy a summary</button>
+      <button id="h-backup" type="button">Make a backup code</button>
+      <button id="h-clear" type="button">Clear the list</button>
+    </div>
+    <label for="h-restore" style="margin-top:14px">Restore from a backup code</label>
+    <textarea id="h-restore" placeholder="Paste a backup code"></textarea>
+    <div class="btns"><button id="h-dorestore" type="button">Restore</button></div>
+  </section>
+</div>
+
+<!-- ============================== THE INVITATION ============================== -->
+<div id="stage">
+  <article class="card" id="card">
+    <svg class="motif" id="motif" aria-hidden="true" preserveAspectRatio="none"></svg>
+    <div class="paper" id="paper">
+      <p class="eyebrow" id="v-eyebrow"></p>
+      <h1 class="name" id="v-name"></h1>
+      <p class="head" id="v-head"></p>
+      <div class="orn" id="v-orn" aria-hidden="true"><i></i><svg viewBox="0 0 24 24"><path id="v-ornpath" d=""></path></svg><i></i></div>
+      <p class="tag" id="v-tag"></p>
+      <div class="rows">
+        <div class="r"><div class="k">When</div>
+          <div class="v"><span id="v-date"></span><small id="v-time"></small></div></div>
+        <div class="r"><div class="k">Where</div>
+          <div class="v"><span id="v-venue"></span><small id="v-city"></small>
+            <a class="noprint" id="v-map" href="#" target="_blank" rel="noopener noreferrer">Open in Maps</a></div></div>
+        <div class="r"><div class="k">RSVP</div>
+          <div class="v"><span id="v-host"></span><small id="v-by"></small></div></div>
+        <div class="r" id="r-notes"><div class="k">Note</div>
+          <div class="v"><span id="v-notes"></span></div></div>
+      </div>
+    </div>
+    <ul id="countdown" class="noprint"></ul>
+    <div id="guestActions" class="noprint">
+      <div class="btns">
+        <button id="a-rsvp" type="button">RSVP</button>
+        <button id="a-cal" type="button">Add to calendar</button>
+        <button id="a-map" type="button">Directions</button>
+      </div>
+      <form id="rsvpForm" class="hide">
+        <label for="g-name">Your name</label><input id="g-name" name="name" type="text" required>
+        <div class="row3">
+          <div><label for="g-count">Guests</label><input id="g-count" name="guests" type="number" value="1" min="0"></div>
+          <div><label for="g-going">Coming?</label>
+            <select id="g-going" name="attending"><option>Yes</option><option>No</option><option>Maybe</option></select></div>
+          <div><label for="g-food">Allergies</label><input id="g-food" name="allergies" type="text"></div>
+        </div>
+        <label for="g-msg">Message</label><textarea id="g-msg" name="message"></textarea>
+        <div class="btns"><button class="go" type="submit" id="g-send">Send</button></div>
+        <p class="note" id="g-stat"></p>
+      </form>
+    </div>
+  </article>
+  <div class="btns noprint" id="previewbtns" style="justify-content:center">
+    <button id="b-play" type="button">Preview the animation</button>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<div id="playwrap" class="noprint">
+  <button class="close" id="b-playclose" type="button">Close</button>
+  <canvas id="playcanvas" width="1080" height="1350"></canvas>
+</div>
+<div id="toast"></div>
+
+<script>
+/* Captured before any script mutates the DOM, so the .html export always
+   writes a clean copy of this file rather than whatever the page became. */
+var PRISTINE = "<!doctype html>\n" + document.documentElement.outerHTML;
+
+var INJECTED = null;   /* an exported standalone file rewrites the marker below */
+/*__STATE__*/
+
+/* ======================================================================
+   QR ENCODER - byte mode, error-correction level L, versions 1-20.
+   Carries up to 858 bytes. Past that it returns null and the interface
+   says so, rather than drawing a code that will not scan.
+   Verified against the published Reed-Solomon reference vector and by
+   round-tripping every version through a separately written decoder.
+   ====================================================================== */
+var QR = (function(){
+  /* version: [total codewords, ec codewords per block, [g1 blocks, g1 data, g2 blocks, g2 data]] */
+  var SPEC = {
+    1:[26,7,[1,19,0,0]],   2:[44,10,[1,34,0,0]],  3:[70,15,[1,55,0,0]],
+    4:[100,20,[1,80,0,0]], 5:[134,26,[1,108,0,0]],6:[172,18,[2,68,0,0]],
+    7:[196,20,[2,78,0,0]], 8:[242,24,[2,97,0,0]], 9:[292,30,[2,116,0,0]],
+    10:[346,18,[2,68,2,69]],
+    11:[404,20,[4,81,0,0]],   12:[466,24,[2,92,2,93]],   13:[532,26,[4,107,0,0]],
+    14:[581,30,[3,115,1,116]],15:[655,22,[5,87,1,88]],   16:[733,24,[5,98,1,99]],
+    17:[815,28,[1,107,5,108]],18:[901,30,[5,120,1,121]], 19:[991,28,[3,113,4,114]],
+    20:[1085,28,[3,107,5,108]]
+  };
+  var MAXVER = 20;                         /* 858 bytes at level L - plenty */
+  var ALIGN = {1:[],2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],
+               7:[6,22,38],8:[6,24,42],9:[6,26,46],10:[6,28,50],
+               11:[6,30,54],12:[6,32,58],13:[6,34,62],14:[6,26,46,66],
+               15:[6,26,48,70],16:[6,26,50,74],17:[6,30,54,78],18:[6,30,56,82],
+               19:[6,30,58,86],20:[6,34,62,90]};
+  var VERINFO = {7:0x07C94,8:0x085BC,9:0x09A99,10:0x0A4D3,11:0x0BBF6,12:0x0C762,
+                 13:0x0D847,14:0x0E60D,15:0x0F928,16:0x10B78,17:0x1145D,18:0x12A17,
+                 19:0x13532,20:0x149A6};
+  var FMT_L  = [0x77C4,0x72F3,0x7DAA,0x789D,0x662F,0x6318,0x6C41,0x6976];
+
+  /* --- GF(256), primitive polynomial 0x11D --- */
+  var EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+  (function(){
+    var x = 1, i;
+    for(i=0;i<255;i++){ EXP[i]=x; LOG[x]=i; x<<=1; if(x & 0x100) x^=0x11D; }
+    for(i=255;i<512;i++) EXP[i]=EXP[i-255];
+  })();
+  function mul(a,b){ return (a===0||b===0) ? 0 : EXP[LOG[a]+LOG[b]]; }
+
+  /* generator polynomial for n error-correction codewords */
+  function genPoly(n){
+    var g=[1], i, j;
+    for(i=0;i<n;i++){
+      var ng=new Array(g.length+1);
+      for(j=0;j<ng.length;j++) ng[j]=0;
+      for(j=0;j<g.length;j++){
+        ng[j]   ^= g[j];
+        ng[j+1] ^= mul(g[j], EXP[i]);
+      }
+      g=ng;
+    }
+    return g;
+  }
+  function ecc(data,n){
+    var g=genPoly(n), res=new Array(data.length+n), i, j;
+    for(i=0;i<data.length;i++) res[i]=data[i];
+    for(i=data.length;i<res.length;i++) res[i]=0;
+    for(i=0;i<data.length;i++){
+      var f=res[i];
+      if(f===0) continue;
+      for(j=0;j<g.length;j++) res[i+j] ^= mul(g[j], f);
+    }
+    return res.slice(data.length);
+  }
+
+  function utf8(s){
+    if(typeof TextEncoder!=="undefined") return Array.prototype.slice.call(new TextEncoder().encode(s));
+    var out=[], e=unescape(encodeURIComponent(s)), i;
+    for(i=0;i<e.length;i++) out.push(e.charCodeAt(i));
+    return out;
+  }
+
+  function make(text){
+    var bytes=utf8(text), ver=0, i, j, k;
+    for(i=1;i<=MAXVER;i++){
+      var sp=SPEC[i], cap0=sp[2][0]*sp[2][1]+sp[2][2]*sp[2][3];
+      var cb=(i<10)?8:16;
+      if(cap0*8 >= 4+cb+bytes.length*8){ ver=i; break; }
+    }
+    if(!ver) return null;                       /* honestly too long - caller says so */
+
+    var spec=SPEC[ver], ecPer=spec[1], grp=spec[2];
+    var dataCw=grp[0]*grp[1]+grp[2]*grp[3];
+    var ccBits=(ver<10)?8:16;
+
+    /* --- bit stream --- */
+    var bits=[];
+    function put(val,len){ for(var b=len-1;b>=0;b--) bits.push((val>>b)&1); }
+    put(4,4); put(bytes.length,ccBits);
+    for(i=0;i<bytes.length;i++) put(bytes[i],8);
+    var cap=dataCw*8;
+    for(i=0;i<4 && bits.length<cap;i++) bits.push(0);      /* terminator */
+    while(bits.length % 8) bits.push(0);
+    var pads=[0xEC,0x11], p=0;
+    while(bits.length < cap) put(pads[(p++)%2],8);
+
+    var cw=[];
+    for(i=0;i<bits.length;i+=8){
+      var byte=0;
+      for(j=0;j<8;j++) byte=(byte<<1)|bits[i+j];
+      cw.push(byte);
+    }
+
+    /* --- blocks, error correction, interleave --- */
+    var blocks=[], ecblocks=[], pos=0;
+    function take(n,count){
+      for(var t=0;t<count;t++){
+        var d=cw.slice(pos,pos+n); pos+=n;
+        blocks.push(d); ecblocks.push(ecc(d,ecPer));
+      }
+    }
+    take(grp[1],grp[0]);
+    if(grp[2]) take(grp[3],grp[2]);
+
+    var out=[], maxD=Math.max(grp[1], grp[3]||0);
+    for(i=0;i<maxD;i++) for(j=0;j<blocks.length;j++) if(i<blocks[j].length) out.push(blocks[j][i]);
+    for(i=0;i<ecPer;i++) for(j=0;j<ecblocks.length;j++) out.push(ecblocks[j][i]);
+
+    /* --- matrix skeleton --- */
+    var size=ver*4+17, m=[], rv=[];
+    for(i=0;i<size;i++){
+      var rowA=[], rowB=[];
+      for(j=0;j<size;j++){ rowA.push(0); rowB.push(0); }
+      m.push(rowA); rv.push(rowB);
+    }
+    function set(r,c,v){ if(r<0||c<0||r>=size||c>=size) return; m[r][c]=v?1:0; rv[r][c]=1; }
+
+    function finder(r,c){
+      for(var dr=-1;dr<8;dr++) for(var dc=-1;dc<8;dc++){
+        var on = (dr>=0&&dr<=6&&(dc===0||dc===6)) ||
+                 (dc>=0&&dc<=6&&(dr===0||dr===6)) ||
+                 (dr>=2&&dr<=4&&dc>=2&&dc<=4);
+        set(r+dr,c+dc,on);
+      }
+    }
+    finder(0,0); finder(0,size-7); finder(size-7,0);
+
+    var al=ALIGN[ver];
+    for(i=0;i<al.length;i++) for(j=0;j<al.length;j++){
+      var ar=al[i], ac=al[j];
+      if((ar<=7&&ac<=7) || (ar<=7&&ac>=size-8) || (ar>=size-8&&ac<=7)) continue;
+      for(var d1=-2;d1<=2;d1++) for(var d2=-2;d2<=2;d2++)
+        set(ar+d1, ac+d2, Math.max(Math.abs(d1),Math.abs(d2)) !== 1);
+    }
+
+    for(i=8;i<size-8;i++){ set(6,i,i%2===0); set(i,6,i%2===0); }
+
+    /* Reserve the format-information areas so data placement skips them.
+       The guard matters: (8,6) and (6,8) belong to the timing patterns and
+       must keep their values - format info steps around them. */
+    for(i=0;i<9;i++){ if(!rv[8][i]) set(8,i,0); if(!rv[i][8]) set(i,8,0); }
+    for(i=0;i<8;i++){ set(8,size-1-i,0); set(size-1-i,8,0); }
+    set(size-8,8,1);                                       /* dark module */
+
+    if(ver>=7){
+      var vi=VERINFO[ver];
+      for(i=0;i<18;i++){
+        var vb=(vi>>i)&1, a=Math.floor(i/3), b=i%3;
+        set(size-11+b, a, vb);
+        set(a, size-11+b, vb);
+      }
+    }
+
+    /* --- zigzag data placement, right to left, skipping the timing column --- */
+    var bi=0, totalBits=out.length*8;
+    function bitAt(n){ return n<totalBits ? (out[n>>3]>>(7-(n&7)))&1 : 0; }
+    var up=true;
+    for(var col=size-1; col>0; col-=2){
+      if(col===6) col--;
+      for(var n2=0;n2<size;n2++){
+        var row = up ? (size-1-n2) : n2;
+        for(k=0;k<2;k++){
+          var cc=col-k;
+          if(rv[row][cc]) continue;
+          m[row][cc]=bitAt(bi); bi++;
+        }
+      }
+      up=!up;
+    }
+
+    /* --- the eight masks, scored by the four standard penalty rules --- */
+    function maskFn(mk,r,c){
+      switch(mk){
+        case 0: return (r+c)%2===0;
+        case 1: return r%2===0;
+        case 2: return c%3===0;
+        case 3: return (r+c)%3===0;
+        case 4: return (Math.floor(r/2)+Math.floor(c/3))%2===0;
+        case 5: return ((r*c)%2 + (r*c)%3)===0;
+        case 6: return (((r*c)%2 + (r*c)%3)%2)===0;
+        default:return (((r+c)%2 + (r*c)%3)%2)===0;
+      }
+    }
+    var PAT1=[1,0,1,1,1,0,1,0,0,0,0], PAT2=[0,0,0,0,1,0,1,1,1,0,1];
+    function penalty(g){
+      var s=0, a, b, run, last;
+      for(a=0;a<size;a++){
+        run=1; last=g[a][0];
+        for(b=1;b<size;b++){
+          if(g[a][b]===last) run++;
+          else { if(run>=5) s+=3+(run-5); run=1; last=g[a][b]; }
+        }
+        if(run>=5) s+=3+(run-5);
+        run=1; last=g[0][a];
+        for(b=1;b<size;b++){
+          if(g[b][a]===last) run++;
+          else { if(run>=5) s+=3+(run-5); run=1; last=g[b][a]; }
+        }
+        if(run>=5) s+=3+(run-5);
+      }
+      for(a=0;a<size-1;a++) for(b=0;b<size-1;b++){
+        var v=g[a][b];
+        if(v===g[a][b+1] && v===g[a+1][b] && v===g[a+1][b+1]) s+=3;
+      }
+      for(a=0;a<size;a++) for(b=0;b<=size-11;b++){
+        var h1=true,h2=true,v1=true,v2=true, t;
+        for(t=0;t<11;t++){
+          var hv=g[a][b+t], vv=g[b+t][a];
+          if(hv!==PAT1[t]) h1=false;
+          if(hv!==PAT2[t]) h2=false;
+          if(vv!==PAT1[t]) v1=false;
+          if(vv!==PAT2[t]) v2=false;
+        }
+        if(h1||h2) s+=40;
+        if(v1||v2) s+=40;
+      }
+      var dark=0;
+      for(a=0;a<size;a++) for(b=0;b<size;b++) dark+=g[a][b];
+      s += Math.floor(Math.abs(dark*100/(size*size) - 50)/5)*10;
+      return s;
+    }
+
+    var best=null, bestScore=Infinity, bestMask=0;
+    for(var mk=0;mk<8;mk++){
+      var g=[];
+      for(i=0;i<size;i++) g.push(m[i].slice());
+      for(i=0;i<size;i++) for(j=0;j<size;j++)
+        if(!rv[i][j] && maskFn(mk,i,j)) g[i][j]^=1;
+
+      var fmt=FMT_L[mk];
+      for(i=0;i<15;i++){
+        var fb=(fmt>>i)&1;
+        if(i<6)       g[8][i]=fb;
+        else if(i===6) g[8][7]=fb;
+        else if(i===7) g[8][8]=fb;
+        else if(i===8) g[7][8]=fb;
+        else           g[14-i][8]=fb;
+
+        if(i<8) g[size-1-i][8]=fb;
+        else    g[8][size-15+i]=fb;
+      }
+      g[size-8][8]=1;
+
+      var sc=penalty(g);
+      if(sc<bestScore){ bestScore=sc; best=g; bestMask=mk; }
+    }
+    return {size:size, version:ver, mask:bestMask, modules:best};
+  }
+
+  function draw(canvas, text, px){
+    var q=make(text), ctx=canvas.getContext("2d");
+    if(!q){ ctx.clearRect(0,0,canvas.width,canvas.height); return null; }
+    var quiet=4, dim=q.size+quiet*2;
+    var scale=Math.max(1, Math.floor((px||canvas.width)/dim));
+    canvas.width=canvas.height=dim*scale;
+    ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle="#000000";
+    for(var r=0;r<q.size;r++) for(var c=0;c<q.size;c++)
+      if(q.modules[r][c]) ctx.fillRect((c+quiet)*scale,(r+quiet)*scale,scale,scale);
+    return q;
+  }
+
+  return {make:make, draw:draw};
+})();
+
+/* ======================================================================
+   SHARED ART
+   Every ornament and background mote is one SVG path in a 24x24 box,
+   centred on (12,12). The DOM renderer drops the string into <path d>;
+   the canvas renderer hands the same string to Path2D. One source of
+   truth, so the live card and the exported PNG cannot disagree.
+   ====================================================================== */
+var GLYPH = {
+  dot:     "M5 12a7 7 0 1 0 14 0a7 7 0 1 0-14 0z",
+  bar:     "M9.5 2h5a1.5 1.5 0 0 1 1.5 1.5v17a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 8 20.5v-17A1.5 1.5 0 0 1 9.5 2z",
+  diamond: "M12 1.5 21 12 12 22.5 3 12z",
+  star4:   "M12 1c.9 6.6 3.5 9.1 10 10-6.5.9-9.1 3.4-10 10-.9-6.6-3.5-9.1-10-10 6.5-.9 9.1-3.4 10-10z",
+  star5:   "M12 1.8l2.9 6.2 6.8.8-5 4.6 1.3 6.7L12 16.8 6 20.1l1.3-6.7-5-4.6 6.8-.8z",
+  moon:    "M15.8 2a10 10 0 1 0 0 20 8.4 8.4 0 0 1 0-20z",
+  heart:   "M12 21.2C3.9 14.1 2.2 9.4 5 6.4c2.6-2.8 5.7-1 7 1.2 1.3-2.2 4.4-4 7-1.2 2.8 3 1.1 7.7-7 14.8z",
+  leaf:    "M12 1.6c5.6 5.4 5.6 13.4 0 20.8-5.6-7.4-5.6-15.4 0-20.8z",
+  /* The ball is one path with the seams as counter-shapes, so it still works
+     as a single <path d> in both renderers - it just needs the even-odd rule. */
+  ball:    "M12 1a11 11 0 1 0 0 22a11 11 0 1 0 0-22z"+
+           "M11.1 1.7h1.8v20.6h-1.8z"+
+           "M1.7 11.1h20.6v1.8h-20.6z"+
+           "M5.3 3.2C9.4 7.6 9.4 16.4 5.3 20.8L4 19.5C7.5 15.6 7.5 8.4 4 4.5z"+
+           "M18.7 3.2C14.6 7.6 14.6 16.4 18.7 20.8L20 19.5C16.5 15.6 16.5 8.4 20 4.5z",
+  ring:    "M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20zM12 6a6 6 0 1 1 0 12a6 6 0 1 1 0-12z"
+};
+/* Glyphs whose counters only appear under the even-odd rule. */
+var GLYPH_RULE = { ball:"evenodd", ring:"evenodd" };
+
+/* ======================================================================
+   THE ENGINE
+   ====================================================================== */
+(function(){
+"use strict";
+var $ = function(id){ return document.getElementById(id); };
+
+/* ---------------------------------------------------------------- themes
+   A theme is data. Adding a look to the shop is a new entry here plus the
+   font names - no engine changes. That is the whole expansion plan.
+   `display` / `body` are full CSS stacks with real fallbacks, so the card
+   still reads properly if the web fonts never arrive. `*Family` is the bare
+   name canvas needs for document.fonts.load().                            */
+var THEMES = {
+  confetti:{ label:"Confetti · bright kids party",
+    bg:["#FFF0F6","#F0EEFF","#E8F6FF"], ink:"#3A2255", paper:"#FFFFFF",
+    a:["#F0407F","#2E9BE0","#FFC233"], motif:["dot","bar","diamond"], orn:"diamond",
+    display:'"Fredoka","Trebuchet MS",Verdana,sans-serif', displayFamily:"Fredoka",
+    body:'"Nunito",system-ui,-apple-system,sans-serif',     bodyFamily:"Nunito" },
+
+  /* Anton ships at a single weight. displayWeight keeps the engine from asking
+     for a 700 it does not have, which the browser would fake-bold badly. */
+  hoops:{ label:"Hoops · kids basketball",
+    bg:["#FFF4E6","#FFE1C2","#F3CFA4"], ink:"#1E2126", paper:"#FFFFFF",
+    a:["#E2602A","#1E2126","#F0A23C"], motif:["ball","bar","star5"], orn:"ball",
+    display:'"Anton",Impact,"Arial Narrow",sans-serif', displayFamily:"Anton",
+    displayWeight:400, headWeight:400,
+    body:'"Nunito",system-ui,-apple-system,sans-serif', bodyFamily:"Nunito" },
+
+  bubblegum:{ label:"Bubblegum · pink and sweet",
+    bg:["#FFE9F4","#FBE4FF","#F0E6FF"], ink:"#57266B", paper:"#FFFFFF",
+    a:["#E8407F","#B978E8","#FFCF5C"], motif:["heart","dot","star5"], orn:"heart",
+    display:'"Baloo 2","Trebuchet MS",Verdana,sans-serif', displayFamily:"Baloo 2",
+    body:'"Nunito",system-ui,-apple-system,sans-serif',     bodyFamily:"Nunito" },
+
+  dusk:{ label:"Dusk · halloween, the tasteful kind",
+    bg:["#1E0E38","#2E1756","#45206F"], ink:"#FBEFDF", paper:"#2A1450",
+    a:["#FF8A3D","#C58CF5","#9BE072"], motif:["moon","star4","dot"], orn:"moon",
+    display:'"Cinzel Decorative",Georgia,"Times New Roman",serif', displayFamily:"Cinzel Decorative",
+    body:'"Karla",system-ui,-apple-system,sans-serif',             bodyFamily:"Karla" },
+
+  meadow:{ label:"Meadow · sage and botanical",
+    bg:["#F2F5ED","#E7EEE1","#DAE6D3"], ink:"#2C3A28", paper:"#FCFDFA",
+    a:["#6B8A59","#B08447","#8FA98A"], motif:["leaf","dot"], orn:"leaf",
+    display:'"Cormorant Garamond",Georgia,"Times New Roman",serif', displayFamily:"Cormorant Garamond",
+    body:'"Karla",system-ui,-apple-system,sans-serif',              bodyFamily:"Karla" },
+
+  midnight:{ label:"Midnight · grown-up and gold",
+    bg:["#0E1018","#171B26","#222838"], ink:"#F0EAE0", paper:"#141822",
+    a:["#C9A227","#A8B4D0","#DCCFB4"], motif:["star4","dot"], orn:"star4",
+    display:'"Playfair Display",Georgia,"Times New Roman",serif', displayFamily:"Playfair Display",
+    body:'"Karla",system-ui,-apple-system,sans-serif',            bodyFamily:"Karla" }
+};
+
+/* --------------------------------------------------------------- state */
+var DEFAULTS = {
+  theme:"confetti",
+  eyebrow:"You are invited to",
+  name:"AVA",
+  head:"turns eight",
+  tag:"Cake, games and a very loud afternoon.",
+  start:"2026-10-24T14:00",
+  dur:120,
+  venue:"Brookside Park Pavilion",
+  city:"Fayetteville, AR",
+  notes:"Wear play clothes. No gifts, just come.",
+  host:"Sam",
+  phone:"555-123-4567",
+  email:"",
+  by:"2026-10-17",
+  rsvp:"text",
+  form:""
+};
+/* Positional order for the URL payload. APPEND ONLY. Reordering this breaks
+   every link already sitting in a customer's text messages. */
+var ORDER = ["theme","eyebrow","name","head","tag","start","dur","venue","city",
+             "notes","host","phone","email","by","rsvp","form"];
+var SCHEMA = 1;
+
+var S = {};
+for(var dk in DEFAULTS) S[dk]=DEFAULTS[dk];
+
+var MODE = "edit", lastLink = "", timer = null, playing = false;
+
+/* ================================================================ codec */
+function b64url(u8){
+  var s="", i;
+  for(i=0;i<u8.length;i++) s+=String.fromCharCode(u8[i]);
+  return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
+function unb64url(str){
+  str=str.replace(/-/g,"+").replace(/_/g,"/");
+  while(str.length%4) str+="=";
+  var bin=atob(str), u8=new Uint8Array(bin.length), i;
+  for(i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i);
+  return u8;
+}
+var HAS_CS = (typeof CompressionStream!=="undefined" && typeof DecompressionStream!=="undefined");
+function deflate(u8){
+  var cs=new CompressionStream("deflate-raw"), w=cs.writable.getWriter();
+  w.write(u8); w.close();
+  return new Response(cs.readable).arrayBuffer().then(function(b){ return new Uint8Array(b); });
+}
+function inflate(u8){
+  var ds=new DecompressionStream("deflate-raw"), w=ds.writable.getWriter();
+  w.write(u8); w.close();
+  return new Response(ds.readable).arrayBuffer().then(function(b){ return new Uint8Array(b); });
+}
+/* One compressor, three jobs: the invitation link, a guest's reply code and
+   the parent's backup code. Same wire format, same prefix convention. */
+function packAny(value){
+  var raw=new TextEncoder().encode(JSON.stringify(value));
+  if(!HAS_CS) return Promise.resolve({s:"j"+b64url(raw), raw:raw.length, packed:raw.length,
+                                      how:"base64url, no compression in this browser"});
+  return deflate(raw).then(function(z){
+    if(z.length < raw.length) return {s:"z"+b64url(z), raw:raw.length, packed:z.length,
+                                      how:"deflate-raw then base64url"};
+    return {s:"j"+b64url(raw), raw:raw.length, packed:raw.length, how:"base64url, deflate did not help"};
+  });
+}
+function unpackAny(str){
+  var tag=str.charAt(0), body=unb64url(str.slice(1));
+  var finish=function(u8){ return JSON.parse(new TextDecoder().decode(u8)); };
+  if(tag==="z"){
+    if(!HAS_CS) return Promise.reject(new Error("this browser cannot read compressed codes"));
+    return inflate(body).then(finish);
+  }
+  return Promise.resolve(finish(body));
+}
+function pack(){
+  var arr=[SCHEMA], i;
+  for(i=0;i<ORDER.length;i++) arr.push(S[ORDER[i]]);
+  return packAny(arr);
+}
+function unpack(str){
+  return unpackAny(str).then(function(arr){
+    if(!Array.isArray(arr)) throw new Error("not an invitation payload");
+    var o={},i;
+    for(i=0;i<ORDER.length;i++) if(arr[i+1]!==undefined && arr[i+1]!==null) o[ORDER[i]]=arr[i+1];
+    return o;
+  });
+}
+
+/* ============================================================ date helpers */
+function startDate(){ var d=new Date(S.start); return isNaN(d)?new Date():d; }
+function endDate(){ return new Date(startDate().getTime() + (Number(S.dur)||120)*60000); }
+function fmtDate(d){
+  try{ return new Intl.DateTimeFormat(undefined,{weekday:"long",month:"long",day:"numeric"}).format(d); }
+  catch(e){ return d.toDateString(); }
+}
+function fmtTime(d){
+  try{ return new Intl.DateTimeFormat(undefined,{hour:"numeric",minute:"2-digit"}).format(d); }
+  catch(e){ return d.toTimeString().slice(0,5); }
+}
+function timeRange(){ return fmtTime(startDate())+" – "+fmtTime(endDate()); }
+function fmtBy(){
+  if(!S.by) return "";
+  var d=new Date(S.by+"T12:00");
+  if(isNaN(d)) return S.by;
+  try{ return new Intl.DateTimeFormat(undefined,{month:"long",day:"numeric"}).format(d); }
+  catch(e){ return S.by; }
+}
+function utcStamp(d){
+  function p(n){ return (n<10?"0":"")+n; }
+  return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+"T"+
+         p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds())+"Z";
+}
+function address(){ return [S.venue,S.city].filter(Boolean).join(", "); }
+function mapUrl(){ return "https://www.google.com/maps/search/?api=1&query="+encodeURIComponent(address()); }
+function title(){ return (S.name?S.name+" — ":"")+(S.head||"You are invited"); }
+
+/* ============================================================ RSVP links */
+function rsvpMessage(){ return "RSVP for "+title()+" on "+fmtDate(startDate())+": "; }
+function rsvpHref(){
+  if(S.rsvp==="email" && S.email)
+    return "mailto:"+encodeURIComponent(S.email)+
+           "?subject="+encodeURIComponent("RSVP — "+title())+
+           "&body="+encodeURIComponent(rsvpMessage());
+  if(S.rsvp==="text" && S.phone)
+    return "sms:"+S.phone.replace(/[^0-9+]/g,"")+"?&body="+encodeURIComponent(rsvpMessage());
+  return "#";
+}
+
+/* ====================================================== colour + motif */
+function hexA(hex,a){
+  var h=hex.replace("#","");
+  if(h.length===3) h=h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  var n=parseInt(h,16);
+  return "rgba("+((n>>16)&255)+","+((n>>8)&255)+","+(n&255)+","+a+")";
+}
+function rng(seed){ return function(){ seed|=0; seed=seed+0x6D2B79F5|0;
+  var t=Math.imul(seed^seed>>>15,1|seed); t=t+Math.imul(t^t>>>7,61|t)^t;
+  return ((t^t>>>14)>>>0)/4294967296; }; }
+
+var MOTIF_N = 66, ART_W = 1080, ART_H = 1350;
+
+/* The motes are laid out once, in the artboard's coordinates, and consumed
+   identically by both renderers. Keep the draw order of rng() calls in sync. */
+function motes(t){
+  var th=THEMES[S.theme]||THEMES.confetti, r=rng(20260918), out=[], i;
+  for(i=0;i<MOTIF_N;i++){
+    var kind=th.motif[i%th.motif.length];
+    var x=r()*ART_W, y0=r()*ART_H, size=22+r()*44, rot=r()*360, alpha=0.16+r()*0.30;
+    out.push({ d:GLYPH[kind], rule:GLYPH_RULE[kind]||"nonzero",
+               x:x, y:(y0 + t*ART_H*0.16)%ART_H, size:size, rot:rot,
+               alpha:alpha, fill:th.a[i%3] });
+  }
+  return out;
+}
+
+/* ============================================================ DOM render */
+function applyTheme(){
+  var th=THEMES[S.theme]||THEMES.confetti, c=$("card").style;
+  c.setProperty("--ink",th.ink);     c.setProperty("--paper",th.paper);
+  c.setProperty("--bg1",th.bg[0]);   c.setProperty("--bg2",th.bg[1]); c.setProperty("--bg3",th.bg[2]);
+  c.setProperty("--a1",th.a[0]);     c.setProperty("--a2",th.a[1]);   c.setProperty("--a3",th.a[2]);
+  c.setProperty("--ink-rule",hexA(th.ink,0.26));
+  c.setProperty("--ink-soft",hexA(th.ink,0.62));
+  c.setProperty("--ink-dim", hexA(th.ink,0.78));
+  c.setProperty("--display",th.display);
+  c.setProperty("--display-weight",String(th.displayWeight||700));
+  c.setProperty("--head-weight",String(th.headWeight||400));
+  c.setProperty("--body",th.body);
+  $("v-ornpath").setAttribute("d",GLYPH[th.orn]);
+  $("v-ornpath").setAttribute("fill-rule",GLYPH_RULE[th.orn]||"nonzero");
+
+  var sv=$("motif");
+  sv.setAttribute("viewBox","0 0 "+ART_W+" "+ART_H);
+  sv.setAttribute("preserveAspectRatio","xMidYMid slice");
+  var m=motes(1), out="", i;
+  for(i=0;i<m.length;i++){
+    var g=m[i];
+    out+='<g transform="translate('+g.x.toFixed(1)+','+g.y.toFixed(1)+') rotate('+g.rot.toFixed(0)+
+         ') scale('+(g.size/24).toFixed(4)+') translate(-12,-12)" opacity="'+g.alpha.toFixed(3)+
+         '"><path d="'+g.d+'" fill="'+g.fill+'" fill-rule="'+g.rule+'"/></g>';
+  }
+  sv.innerHTML=out;
+}
+function txt(id,v){ var e=$(id); if(e) e.textContent=v||""; }
+
+function render(){
+  applyTheme();
+  txt("v-eyebrow",S.eyebrow); txt("v-name",S.name); txt("v-head",S.head); txt("v-tag",S.tag);
+  txt("v-date",fmtDate(startDate())); txt("v-time",timeRange());
+  txt("v-venue",S.venue); txt("v-city",S.city);
+  txt("v-host",S.host); txt("v-by", S.by? "please reply by "+fmtBy() : "");
+  txt("v-notes",S.notes);
+  $("r-notes").classList.toggle("hide", !S.notes);
+  $("v-head").classList.toggle("hide", !S.head);
+  $("v-tag").classList.toggle("hide", !S.tag);
+  $("v-map").href=mapUrl();
+  $("v-map").classList.toggle("hide", !address());
+
+  /* The card may have had its action strip removed (parent view), so nothing
+     below is assumed to exist. */
+  var send=$("g-send");
+  if(send) send.textContent = (S.rsvp==="form" && S.form) ? "Send RSVP"
+                            : S.rsvp==="email" ? "Send by email" : "Send by text";
+  document.title = title();
+  tick();
+  if(MODE==="edit") drawQR();
+}
+
+function tick(){
+  var ul=$("countdown"), ms=startDate()-new Date();
+  if(ms<=0){
+    ul.innerHTML='<li class="wide"><b>'+
+      (ms > -(Number(S.dur)||120)*60000 ? "Happening now" : "This date has passed")+'</b></li>';
+    return;
+  }
+  var s=Math.floor(ms/1000), parts=[
+    [Math.floor(s/86400),"days"],[Math.floor(s/3600)%24,"hours"],
+    [Math.floor(s/60)%60,"min"],[s%60,"sec"]];
+  ul.innerHTML=parts.map(function(p){ return "<li><b>"+p[0]+"</b><span>"+p[1]+"</span></li>"; }).join("");
+}
+
+/* ====================================================== canvas painter
+   The second renderer over the same state. This is what produces the PNG,
+   the 300 dpi print file and every video frame.                          */
+function rr(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+function ease(x){ return 1-Math.pow(1-x,3); }
+function stage(t,a,b){ return Math.max(0,Math.min(1,(t-a)/(b-a))); }
+function wrap(ctx,text,maxW){
+  var words=String(text||"").split(/\s+/), lines=[], cur="", i;
+  for(i=0;i<words.length;i++){
+    var trial = cur ? cur+" "+words[i] : words[i];
+    if(ctx.measureText(trial).width>maxW && cur){ lines.push(cur); cur=words[i]; }
+    else cur=trial;
+  }
+  if(cur) lines.push(cur);
+  return lines;
+}
+function fitSize(ctx,text,maxW,start,font,weight){
+  var s=start;
+  while(s>10){
+    ctx.font=(weight||"700")+" "+s+"px "+font;
+    if(ctx.measureText(text).width<=maxW) break;
+    s-=Math.max(1,Math.round(s*0.04));
+  }
+  return s;
+}
+/* letterSpacing is native in current browsers; the manual path keeps older
+   ones from exporting untracked labels that look nothing like the card. */
+function tracked(ctx,text,x,y,track,align){
+  if("letterSpacing" in ctx){
+    ctx.letterSpacing=track+"px"; ctx.textAlign=align||"center";
+    ctx.fillText(text,x,y); ctx.letterSpacing="0px"; return;
+  }
+  var w=0,i;
+  for(i=0;i<text.length;i++) w+=ctx.measureText(text[i]).width+track;
+  w-=track;
+  var cx = (align==="left") ? x : x-w/2;
+  ctx.textAlign="left";
+  for(i=0;i<text.length;i++){ ctx.fillText(text[i],cx,y); cx+=ctx.measureText(text[i]).width+track; }
+}
+function glyph(ctx,d,x,y,size,rot,fill,alpha,rule){
+  ctx.save();
+  ctx.globalAlpha=alpha; ctx.fillStyle=fill;
+  ctx.translate(x,y);
+  if(rot) ctx.rotate(rot*Math.PI/180);
+  ctx.scale(size/24,size/24); ctx.translate(-12,-12);
+  ctx.fill(new Path2D(d), rule||"nonzero");
+  ctx.restore();
+}
+
+function paint(ctx,W,H,t){
+  if(t===undefined) t=1;
+  var th=THEMES[S.theme]||THEMES.confetti, k=W/ART_W, i;
+
+  /* ground */
+  var g=ctx.createLinearGradient(W*0.12,0,W*0.72,H);
+  g.addColorStop(0,th.bg[0]); g.addColorStop(0.54,th.bg[1]); g.addColorStop(1,th.bg[2]);
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  var glow=ctx.createRadialGradient(W*0.16,H*0.06,0,W*0.16,H*0.06,W*0.72);
+  glow.addColorStop(0,hexA(th.a[0],0.16)); glow.addColorStop(1,hexA(th.a[0],0));
+  ctx.fillStyle=glow; ctx.fillRect(0,0,W,H);
+  var glow2=ctx.createRadialGradient(W*0.92,H*0.94,0,W*0.92,H*0.94,W*0.66);
+  glow2.addColorStop(0,hexA(th.a[1],0.14)); glow2.addColorStop(1,hexA(th.a[1],0));
+  ctx.fillStyle=glow2; ctx.fillRect(0,0,W,H);
+
+  /* motes - same table the DOM uses */
+  var fade=stage(t,0,0.24), m=motes(t), sx=W/ART_W, sy=H/ART_H;
+  for(i=0;i<m.length;i++){
+    var p=m[i];
+    glyph(ctx,p.d,p.x*sx,p.y*sy,p.size*k,p.rot,p.fill,p.alpha*fade,p.rule);
+  }
+
+  /* paper panel */
+  var pop=0.945+0.055*ease(stage(t,0,0.28));
+  var mx=76*k, my=76*k, pw=W-mx*2, ph=H-my*2;
+  ctx.save();
+  ctx.translate(W/2,H/2); ctx.scale(pop,pop); ctx.translate(-W/2,-H/2);
+  ctx.globalAlpha=stage(t,0,0.2);
+  ctx.shadowColor="rgba(0,0,0,.20)"; ctx.shadowBlur=34*k; ctx.shadowOffsetY=10*k;
+  ctx.fillStyle=th.paper; rr(ctx,mx,my,pw,ph,26*k); ctx.fill();
+  ctx.shadowColor="transparent"; ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+  ctx.strokeStyle=hexA(th.ink,0.26); ctx.lineWidth=2*k;
+  rr(ctx,mx+26*k,my+26*k,pw-52*k,ph-52*k,13*k); ctx.stroke();
+  ctx.restore();
+
+  var pad=80*k, innerW=pw-pad*2, left=mx+pad, cx=W/2;
+
+  /* ---- measure, so the block sits optically centred at any aspect ---- */
+  var blocks=[];
+  if(S.eyebrow){
+    ctx.font="700 "+(24*k)+"px "+th.body;
+    blocks.push({kind:"eyebrow",text:S.eyebrow.toUpperCase(),size:24*k,h:27*k,gap:34*k,from:0.14,to:0.34});
+  }
+  var dW=String(th.displayWeight||700), hW=String(th.headWeight||400);
+  var nameSize=fitSize(ctx,S.name||"",innerW,148*k,th.display,dW);
+  blocks.push({kind:"name",text:S.name||"",size:nameSize,h:nameSize*1.0,gap:14*k,from:0.24,to:0.5});
+  if(S.head){
+    var hs=fitSize(ctx,S.head,innerW,66*k,th.display,hW);
+    blocks.push({kind:"head",text:S.head,size:hs,h:hs*1.12,gap:34*k,from:0.34,to:0.56});
+  }
+  blocks.push({kind:"orn",h:24*k,gap:34*k,from:0.42,to:0.62});
+  if(S.tag){
+    ctx.font="400 "+(32*k)+"px "+th.body;
+    var tl=wrap(ctx,S.tag,innerW*0.92);
+    blocks.push({kind:"tag",lines:tl,size:32*k,h:tl.length*44*k,gap:40*k,from:0.48,to:0.66});
+  }
+  var rows=[["When",fmtDate(startDate()),timeRange()],
+            ["Where",S.venue,S.city],
+            ["RSVP",S.host,(S.by?"by "+fmtBy():"")]];
+  if(S.notes) rows.push(["Note",S.notes,""]);
+  for(i=0;i<rows.length;i++){
+    ctx.font="600 "+(33*k)+"px "+th.body;
+    var vlines=wrap(ctx,rows[i][1],innerW-168*k);
+    blocks.push({kind:"row",row:rows[i],vlines:vlines,
+                 h:(vlines.length*40 + (rows[i][2]?32:0))*k, gap:28*k,
+                 from:Math.min(0.9,0.56+i*0.06), to:Math.min(1,0.74+i*0.06)});
+  }
+
+  var total=0;
+  for(i=0;i<blocks.length;i++) total+=blocks[i].h+(i<blocks.length-1?blocks[i].gap:0);
+  var y=my+(ph-total)/2;
+
+  /* A long name, a wordy note or the taller 5x7 crop can overrun the panel.
+     Scaling about the panel's centre keeps the block centred while it shrinks,
+     so the card degrades gracefully instead of printing off the edge. */
+  var avail=ph-44*k, fit=(total>avail) ? avail/total : 1;
+
+  /* ---- draw ---- */
+  ctx.textBaseline="top";
+  ctx.save();
+  if(fit<1){
+    ctx.translate(cx,my+ph/2); ctx.scale(fit,fit); ctx.translate(-cx,-(my+ph/2));
+  }
+  for(i=0;i<blocks.length;i++){
+    var b=blocks[i], pr=ease(stage(t,b.from,b.to));
+    ctx.save();
+    ctx.globalAlpha=pr;
+    ctx.translate(0,(1-pr)*20*k);
+
+    if(b.kind==="eyebrow"){
+      ctx.font="700 "+b.size+"px "+th.body; ctx.fillStyle=th.a[0];
+      tracked(ctx,b.text,cx,y,b.size*0.24,"center");
+    }
+    else if(b.kind==="name"){
+      var bump=1+0.10*(1-pr);
+      ctx.font=dW+" "+b.size+"px "+th.display; ctx.fillStyle=th.ink; ctx.textAlign="center";
+      ctx.save(); ctx.translate(cx,y+b.h/2); ctx.scale(bump,bump);
+      ctx.fillText(b.text,0,-b.h/2); ctx.restore();
+    }
+    else if(b.kind==="head"){
+      ctx.font=hW+" "+b.size+"px "+th.display; ctx.fillStyle=th.a[0]; ctx.textAlign="center";
+      ctx.fillText(b.text,cx,y);
+    }
+    else if(b.kind==="orn"){
+      var half=pr*102*k, gap=22*k, yy=y+b.h/2;
+      ctx.strokeStyle=hexA(th.ink,0.26); ctx.lineWidth=2*k; ctx.beginPath();
+      ctx.moveTo(cx-gap-half,yy); ctx.lineTo(cx-gap,yy);
+      ctx.moveTo(cx+gap,yy);      ctx.lineTo(cx+gap+half,yy);
+      ctx.stroke();
+      glyph(ctx,GLYPH[th.orn],cx,yy,b.h*pr,0,th.a[0],pr,GLYPH_RULE[th.orn]);
+    }
+    else if(b.kind==="tag"){
+      ctx.font="400 "+b.size+"px "+th.body; ctx.fillStyle=hexA(th.ink,0.62); ctx.textAlign="center";
+      for(var j=0;j<b.lines.length;j++) ctx.fillText(b.lines[j],cx,y+j*44*k);
+    }
+    else if(b.kind==="row"){
+      ctx.font="700 "+(21*k)+"px "+th.body; ctx.fillStyle=th.a[1];
+      tracked(ctx,b.row[0].toUpperCase(),left,y+7*k,21*k*0.15,"left");
+      ctx.textAlign="left";
+      ctx.font="600 "+(33*k)+"px "+th.body; ctx.fillStyle=th.ink;
+      for(var q=0;q<b.vlines.length;q++) ctx.fillText(b.vlines[q],left+168*k,y+q*40*k);
+      if(b.row[2]){
+        ctx.font="400 "+(27*k)+"px "+th.body; ctx.fillStyle=hexA(th.ink,0.62);
+        ctx.fillText(b.row[2],left+168*k,y+b.vlines.length*40*k+3*k);
+      }
+    }
+    ctx.restore();
+    y+=b.h+b.gap;
+  }
+  ctx.restore();
+}
+
+/* Canvas draws text with whatever font is resolved at that instant, so the
+   web font has to be in memory before the first stroke or the export silently
+   falls back and looks nothing like the card on screen. */
+function ensureFonts(){
+  var th=THEMES[S.theme]||THEMES.confetti;
+  if(!document.fonts || !document.fonts.load) return Promise.resolve(false);
+  var want=[(th.displayWeight||700)+' 130px "'+th.displayFamily+'"',
+            (th.headWeight||400)+' 58px "'+th.displayFamily+'"',
+            '700 21px "'+th.bodyFamily+'"',     '600 30px "'+th.bodyFamily+'"',
+            '400 29px "'+th.bodyFamily+'"'];
+  return Promise.all(want.map(function(f){
+    return document.fonts.load(f).catch(function(){});
+  })).then(function(){ return document.fonts.ready; }).then(function(){ return true; });
+}
+function paintTo(W,H,t){
+  var c=document.createElement("canvas");
+  c.width=W; c.height=H;
+  paint(c.getContext("2d"),W,H,t===undefined?1:t);
+  return c;
+}
+
+/* ============================================================== outputs */
+function saveBlob(name,blob){
+  var u=URL.createObjectURL(blob), a=document.createElement("a");
+  a.href=u; a.download=name; document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(u); a.remove(); },1500);
+}
+function slug(){
+  return (S.name||"invitation").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"") || "invitation";
+}
+function savePNG(W,H,suffix,label){
+  toast("Rendering "+label+"…");
+  return ensureFonts().then(function(){
+    var c=paintTo(W,H,1);
+    return new Promise(function(res){
+      c.toBlob(function(b){ saveBlob(slug()+suffix+".png",b); toast(label+" saved."); res(); },"image/png");
+    });
+  });
+}
+
+var VIDEO_MIMES=["video/mp4;codecs=avc1.42E01E","video/mp4",
+                 "video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"];
+function pickMime(){
+  if(typeof MediaRecorder==="undefined") return null;
+  for(var i=0;i<VIDEO_MIMES.length;i++)
+    if(MediaRecorder.isTypeSupported(VIDEO_MIMES[i])) return VIDEO_MIMES[i];
+  return null;
+}
+function recordVideo(){
+  var mime=pickMime();
+  if(!mime){ toast("This browser cannot record video. The PNG and print files still work."); return; }
+  $("b-video").disabled=true;
+  ensureFonts().then(function(){
+    var W=ART_W,H=ART_H,FPS=30,ANIM=4200,HOLD=2200,TOTAL=ANIM+HOLD;
+    var c=document.createElement("canvas"); c.width=W; c.height=H;
+    var ctx=c.getContext("2d");
+    paint(ctx,W,H,0);                       /* a first frame, or the stream starts empty */
+    var rec=new MediaRecorder(c.captureStream(FPS),{mimeType:mime,videoBitsPerSecond:8000000});
+    var chunks=[];
+    rec.ondataavailable=function(e){ if(e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop=function(){
+      var ext = mime.indexOf("mp4")>-1 ? "mp4" : "webm";
+      saveBlob(slug()+"-invitation."+ext, new Blob(chunks,{type:mime}));
+      $("recbar").classList.remove("on");
+      $("b-video").disabled=false;
+      toast(ext==="mp4" ? "MP4 saved."
+                        : "Saved as .webm — this browser has no MP4 recorder, and Messages on iPhone will not play it.");
+    };
+    $("recbar").classList.add("on");
+    $("recmsg").textContent="Recording "+(TOTAL/1000)+" seconds as "+mime.split(";")[0];
+    rec.start();
+    var t0=performance.now();
+    (function frame(now){
+      var el=now-t0;
+      paint(ctx,W,H,Math.min(1,el/ANIM));
+      $("recprog").value=Math.min(100, el/TOTAL*100);
+      if(el<TOTAL) requestAnimationFrame(frame); else rec.stop();
+    })(t0);
+  });
+}
+function playPreview(){
+  if(playing) return;
+  var cv=$("playcanvas"), ctx=cv.getContext("2d");
+  $("playwrap").classList.add("on");
+  playing=true;
+  ensureFonts().then(function(){
+    var ANIM=4200, HOLD=1400, t0=performance.now();
+    (function frame(now){
+      if(!playing) return;
+      var el=now-t0;
+      paint(ctx,ART_W,ART_H,Math.min(1,el/ANIM));
+      if(el<ANIM+HOLD) requestAnimationFrame(frame); else playing=false;
+    })(t0);
+  });
+}
+function stopPreview(){ playing=false; $("playwrap").classList.remove("on"); }
+
+function exportHTML(){
+  var baked="INJECTED = "+JSON.stringify(S).replace(/</g,"\\u003c")+";";
+  var html=PRISTINE.replace("/*__STATE__*/", baked);
+  if(html===PRISTINE){ toast("Could not find the state marker, export stopped."); return; }
+  saveBlob(slug()+"-invitation.html", new Blob([html],{type:"text/html"}));
+  toast("Standalone page saved.");
+}
+function icsText(){
+  function esc(s){ return String(s||"").replace(/[\\;,]/g,function(m){return "\\"+m;}).replace(/\n/g,"\\n"); }
+  return ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//Invitation Engine//EN","CALSCALE:GREGORIAN",
+    "BEGIN:VEVENT",
+    "UID:"+Date.now()+"@invitation.local",
+    "DTSTAMP:"+utcStamp(new Date()),
+    "DTSTART:"+utcStamp(startDate()),
+    "DTEND:"+utcStamp(endDate()),
+    "SUMMARY:"+esc(title()),
+    "LOCATION:"+esc(address()),
+    "DESCRIPTION:"+esc([S.tag,S.notes,S.host?("RSVP to "+S.host):""].filter(Boolean).join(" ")),
+    "END:VEVENT","END:VCALENDAR"].join("\r\n");
+}
+function gcalUrl(){
+  return "https://calendar.google.com/calendar/render?action=TEMPLATE"+
+    "&text="+encodeURIComponent(title())+
+    "&dates="+utcStamp(startDate())+"/"+utcStamp(endDate())+
+    "&location="+encodeURIComponent(address())+
+    "&details="+encodeURIComponent([S.tag,S.notes].filter(Boolean).join(" "));
+}
+
+/* ============================================================ share link */
+function buildLink(){
+  return pack().then(function(r){
+    var base=($("f-base").value||location.href.split("#")[0]).trim();
+    lastLink = base + "#i=" + r.s;
+    $("linkout").value = lastLink;
+    $("linkstat").innerHTML =
+      "State <b>"+r.raw+" bytes</b> becomes a <b>"+r.packed+" byte</b> payload ("+r.how+
+      "), giving a <b>"+lastLink.length+" character</b> link. Nothing after the # reaches a server.";
+    drawQR();
+    return lastLink;
+  });
+}
+function drawQR(){
+  var link = lastLink || "";
+  var cv=$("qr");
+  if(!link){
+    cv.getContext("2d").clearRect(0,0,cv.width,cv.height);
+    $("qrstat").textContent="Build a link and a QR code appears here for the printed card.";
+    $("b-qr").disabled=true; return;
+  }
+  var q=QR.draw(cv,link,264);
+  if(!q){
+    $("qrstat").innerHTML="<span class='no'>That link is "+link.length+" characters, past the 858 byte ceiling.</span> "+
+      "Shorten the link base or put it through a link shortener.";
+    $("b-qr").disabled=true;
+  } else {
+    var size = q.size<=45 ? "prints clean from about an inch square"
+             : q.size<=65 ? "give it an inch and a half on paper"
+             : "give it two inches on paper, the modules are fine";
+    $("qrstat").innerHTML="Version "+q.version+", "+q.size+"&nbsp;&times;&nbsp;"+q.size+
+      " modules, correction level L. Scans to the link above and "+size+".";
+    $("b-qr").disabled=false;
+  }
+}
+
+/* ================================================================= misc */
+var toastT=null;
+function toast(m){
+  var e=$("toast"); e.textContent=m; e.classList.add("on");
+  clearTimeout(toastT); toastT=setTimeout(function(){ e.classList.remove("on"); },3200);
+}
+function readForm(){
+  S.theme=$("f-theme").value; S.eyebrow=$("f-eyebrow").value; S.name=$("f-name").value;
+  S.head=$("f-head").value; S.tag=$("f-tag").value; S.start=$("f-start").value;
+  S.dur=Number($("f-dur").value)||120; S.venue=$("f-venue").value; S.city=$("f-city").value;
+  S.notes=$("f-notes").value; S.host=$("f-host").value; S.by=$("f-by").value;
+  S.phone=$("f-phone").value; S.email=$("f-email").value; S.form=$("f-form").value;
+  S.rsvp = $("rv-email").checked ? "email" : $("rv-form").checked ? "form" : "text";
+  $("formwrap").classList.toggle("hide", S.rsvp!=="form");
+  render();
+}
+function writeForm(){
+  $("f-theme").value=S.theme; $("f-eyebrow").value=S.eyebrow; $("f-name").value=S.name;
+  $("f-head").value=S.head; $("f-tag").value=S.tag; $("f-start").value=S.start;
+  $("f-dur").value=S.dur; $("f-venue").value=S.venue; $("f-city").value=S.city;
+  $("f-notes").value=S.notes; $("f-host").value=S.host; $("f-by").value=S.by;
+  $("f-phone").value=S.phone; $("f-email").value=S.email; $("f-form").value=S.form;
+  $("rv-"+(S.rsvp||"text")).checked=true;
+  $("formwrap").classList.toggle("hide", S.rsvp!=="form");
+}
+function diagnostics(){
+  function row(k,good,detail){
+    return "<tr><td>"+k+"</td><td><span class='"+(good?"ok":"no")+"'>"+(good?"yes":"no")+"</span>"+
+           (detail?" — "+detail:"")+"</td></tr>";
+  }
+  var mime=pickMime(), th=THEMES[S.theme];
+  var fontOk = document.fonts ? document.fonts.check('700 40px "'+th.displayFamily+'"') : false;
+  var h="";
+  h+=row("Compress the link payload",HAS_CS,HAS_CS?"CompressionStream, deflate-raw":"falls back to plain base64");
+  h+=row("PNG export",!!document.createElement("canvas").toBlob,"share size and 300 dpi print");
+  h+=row("Record video",!!mime,mime||"the PNG and print files still work");
+  h+=row("Record as MP4, not only WebM",!!(mime&&mime.indexOf("mp4")>-1),
+         mime&&mime.indexOf("mp4")>-1?"plays in Messages and on iPhone":"WebM will not play in Messages on iPhone");
+  h+=row("Shared vector art (Path2D)",typeof Path2D!=="undefined","keeps the card and the export identical");
+  h+=row("Letter spacing on canvas",("letterSpacing" in document.createElement("canvas").getContext("2d")),
+         "there is a manual fallback either way");
+  h+=row("Theme web font loaded",fontOk,fontOk? th.displayFamily : "using the fallback stack, which is by design");
+  h+=row("Clipboard",!!(navigator.clipboard&&navigator.clipboard.writeText),"the copy button");
+  h+=row("Served over http, not file://",location.protocol!=="file:",
+         location.protocol==="file:"?"share links need this hosted before they work":location.origin);
+  $("diag").innerHTML=h;
+}
+
+window.ENGINE = {
+  state:S, themes:THEMES, defaults:DEFAULTS, glyphs:GLYPH,
+  pack:pack, unpack:unpack, paint:paint, paintTo:paintTo, motes:motes,
+  ics:icsText, gcal:gcalUrl, buildLink:buildLink, exportHTML:exportHTML,
+  qr:QR, videoMime:pickMime, render:render, ensureFonts:ensureFonts,
+  packAny:packAny, unpackAny:unpackAny,
+  guests:{ key:evKey, load:loadGuests, save:saveGuests, render:renderHost,
+           csv:exportCSV, backup:makeBackup, restore:doRestore }
+};
+
+/* =================================================================== boot */
+function toHost(){
+  MODE="host";
+  var ed=$("editor");        if(ed) ed.remove();
+  var pb=$("previewbtns");   if(pb) pb.remove();
+  var ga=$("guestActions");  if(ga) ga.remove();
+  $("hostview").classList.remove("hide");
+  var sub=document.querySelector(".masthead p");
+  if(sub) sub.textContent="Guest list \u2014 held on this device, seen by nobody else.";
+}
+function toGuest(){
+  MODE="guest";
+  var ed=$("editor"); if(ed) ed.remove();
+  var pb=$("previewbtns"); if(pb) pb.remove();
+  var mh=document.querySelector(".masthead"); if(mh) mh.remove();
+  var w=document.querySelector(".wrap");
+  w.style.gridTemplateColumns="1fr";
+  w.style.maxWidth="560px";
+  w.style.paddingTop="28px";
+}
+function esc(t){
+  return String(t==null?"":t).replace(/[&<>"]/g,function(m){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[m]; });
+}
+function postForm(form){
+  var fd=new FormData(form);
+  fd.append("event",title()); fd.append("date",fmtDate(startDate()));
+  $("g-send").disabled=true; $("g-stat").textContent="Sending\u2026";
+  return fetch(S.form,{method:"POST",body:fd,headers:{Accept:"application/json"}})
+    .then(function(r){
+      $("g-stat").innerHTML = r.ok ? "<span class='ok'>Sent. Thank you.</span>"
+        : "<span class='no'>That did not go through. Please text or email the host.</span>";
+      if(r.ok) form.reset();
+    })
+    .catch(function(){
+      $("g-stat").innerHTML="<span class='no'>No connection. Please text or email the host.</span>";
+    })
+    .then(function(){ $("g-send").disabled=false; });
+}
+
+/* A reply is readable first and machine-readable second. The host can act on
+   the message at a glance; the code on the last line is what fills the guest
+   list in one tap if they choose to use it. */
+function sendReply(form){
+  var name=$("g-name").value.trim();
+  if(!name){ $("g-name").focus(); return; }
+  if(S.rsvp==="form" && S.form){ postForm(form); return; }
+
+  var count=Number($("g-count").value)||0, going=$("g-going").value,
+      food=$("g-food").value.trim(), msg=$("g-msg").value.trim();
+  var code={Yes:"Y",No:"N",Maybe:"M"}[going]||"M";
+
+  packAny([1,name,count,code,food,msg]).then(function(r){
+    var lines=["RSVP \u2014 "+name,
+               (code==="Y"?"Coming":code==="N"?"Not coming":"Maybe")+
+                 (code==="N"?"":" \u00b7 "+count+(count===1?" person":" people"))];
+    if(food) lines.push("Allergies: "+food);
+    if(msg)  lines.push("\u201c"+msg+"\u201d");
+    lines.push("","r1."+r.s);
+    var body=lines.join("\n"), href="";
+
+    if(S.rsvp==="email" && S.email)
+      href="mailto:"+encodeURIComponent(S.email)+
+           "?subject="+encodeURIComponent("RSVP \u2014 "+title())+
+           "&body="+encodeURIComponent(body);
+    else if(S.phone)
+      href="sms:"+S.phone.replace(/[^0-9+]/g,"")+"?&body="+encodeURIComponent(body);
+
+    if(href){
+      window.location.href=href;
+      $("g-stat").innerHTML="<span class='ok'>Your reply is waiting in your messages \u2014 press send.</span>";
+    } else if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(body).then(function(){
+        $("g-stat").innerHTML="<span class='ok'>Copied. Paste it to the host.</span>";
+      });
+    } else {
+      $("g-stat").textContent=body;
+    }
+  });
+}
+
+function bindGuest(){
+  var cal=$("a-cal");
+  if(cal) cal.onclick=function(){ saveBlob(slug()+".ics", new Blob([icsText()],{type:"text/calendar"})); };
+  var mp=$("a-map");
+  if(mp) mp.onclick=function(){ window.open(mapUrl(),"_blank","noopener"); };
+  var rb=$("a-rsvp");
+  if(rb) rb.onclick=function(){
+    var f=$("rsvpForm");
+    f.classList.toggle("hide");
+    if(!f.classList.contains("hide")) $("g-name").focus();
+  };
+  var fm=$("rsvpForm");
+  if(fm) fm.onsubmit=function(e){ e.preventDefault(); sendReply(e.target); };
+}
+
+/* ====================================================== THE PARENT SIDE
+   The guest list is held in this browser, under a key derived from the event.
+   No account and no server, and the privacy property falls straight out of
+   that: a guest who opens the same host link sees their own empty list,
+   never yours.                                                            */
+function evKey(){
+  var str=(S.name||"")+"|"+(S.start||""), h=5381, i;
+  for(i=0;i<str.length;i++) h=((h*33)^str.charCodeAt(i))>>>0;
+  return "ie.guests."+h.toString(36);
+}
+function loadGuests(){
+  try{ var v=JSON.parse(localStorage.getItem(evKey())||"[]"); return Array.isArray(v)?v:[]; }
+  catch(e){ return []; }
+}
+function saveGuests(list){
+  try{ localStorage.setItem(evKey(),JSON.stringify(list)); return true; }
+  catch(e){ toast("This browser will not save the list. Take a backup code instead."); return false; }
+}
+var editIx=-1;
+function statusWord(c){ return c==="Y"?"Coming":c==="N"?"Not coming":"Maybe"; }
+
+function renderHost(){
+  var list=loadGuests(), yes=0, may=0, nope=0, i;
+  for(i=0;i<list.length;i++){
+    var n=Number(list[i].c)||0;
+    if(list[i].s==="Y") yes+=n; else if(list[i].s==="M") may+=n; else nope+=n;
+  }
+  $("host-event").innerHTML="<b>"+esc(title())+"</b> &middot; "+esc(fmtDate(startDate()))+
+    " &middot; "+esc(timeRange());
+  $("host-stats").innerHTML=
+    '<div class="stat yes"><b>'+yes+'</b><span>coming</span></div>'+
+    '<div class="stat maybe"><b>'+may+'</b><span>maybe</span></div>'+
+    '<div class="stat no"><b>'+nope+'</b><span>cannot come</span></div>'+
+    '<div class="stat"><b>'+list.length+'</b><span>replies logged</span></div>';
+
+  var alg=list.filter(function(g){ return g.a; })
+              .map(function(g){ return "<span>"+esc(g.a)+" \u2014 "+esc(g.n)+"</span>"; });
+  $("host-allergy").innerHTML=alg.join("");
+
+  if(!list.length){
+    $("host-table").innerHTML='<p class="empty">No replies logged yet. Paste one above to start.</p>';
+    return;
+  }
+  $("host-table").innerHTML='<table class="gtable"><thead><tr><th>Guest</th><th>Reply</th>'+
+    '<th>How many</th><th></th></tr></thead><tbody>'+
+    list.map(function(g,ix){
+      return "<tr><td><span class='nm'>"+esc(g.n)+"</span>"+
+        (g.m?"<span class='sub'>"+esc(g.m)+"</span>":"")+
+        (g.a?"<span class='sub'>Allergies: "+esc(g.a)+"</span>":"")+"</td>"+
+        "<td><span class='tag-"+g.s.toLowerCase()+"'>"+statusWord(g.s)+"</span></td>"+
+        "<td>"+(g.s==="N"?"\u2014":(Number(g.c)||0))+"</td>"+
+        "<td style='white-space:nowrap'><button data-ed='"+ix+"'>Edit</button> "+
+        "<button data-rm='"+ix+"'>Remove</button></td></tr>";
+    }).join("")+"</tbody></table>";
+
+  Array.prototype.forEach.call($("host-table").querySelectorAll("[data-rm]"),function(b){
+    b.onclick=function(){
+      var l=loadGuests(); l.splice(Number(b.getAttribute("data-rm")),1);
+      saveGuests(l); clearHostForm(); renderHost();
+    };
+  });
+  Array.prototype.forEach.call($("host-table").querySelectorAll("[data-ed]"),function(b){
+    b.onclick=function(){
+      var ix=Number(b.getAttribute("data-ed")), g=loadGuests()[ix];
+      editIx=ix;
+      $("h-name").value=g.n; $("h-count").value=g.c; $("h-status").value=g.s;
+      $("h-allergy").value=g.a||""; $("h-note").value=g.m||"";
+      $("h-add").textContent="Save the change";
+      $("h-cancel").classList.remove("hide");
+      $("h-name").scrollIntoView({block:"center"});
+    };
+  });
+}
+function clearHostForm(){
+  editIx=-1;
+  $("h-name").value=""; $("h-count").value="1"; $("h-status").value="Y";
+  $("h-allergy").value=""; $("h-note").value=""; $("h-paste").value="";
+  $("h-add").textContent="Add to the list";
+  $("h-cancel").classList.add("hide");
+}
+function addGuest(){
+  var n=$("h-name").value.trim();
+  if(!n){ $("h-name").focus(); toast("A name, at least."); return; }
+  var was=editIx;
+  var rec={ n:n, c:Number($("h-count").value)||0, s:$("h-status").value,
+            a:$("h-allergy").value.trim(), m:$("h-note").value.trim(), t:Date.now() };
+  var l=loadGuests();
+  if(was>=0) l[was]=rec; else l.push(rec);
+  saveGuests(l); clearHostForm(); renderHost();
+  toast(was>=0 ? "Updated." : "Added to the list.");
+}
+function readPaste(){
+  var raw=$("h-paste").value||"", m=raw.match(/r1\.([A-Za-z0-9_-]+)/);
+  if(!m){
+    $("h-note").value=raw.trim().replace(/\s+/g," ").slice(0,140);
+    toast("No reply code in that one. Fill in the name and how many.");
+    $("h-name").focus();
+    return;
+  }
+  unpackAny(m[1]).then(function(a){
+    if(!Array.isArray(a)) throw new Error("bad code");
+    $("h-name").value=a[1]||"";
+    $("h-count").value=(a[2]==null?1:a[2]);
+    $("h-status").value=(a[3]==="Y"||a[3]==="N"||a[3]==="M")?a[3]:"M";
+    $("h-allergy").value=a[4]||"";
+    $("h-note").value=a[5]||"";
+    toast("Read it. Check it over, then add.");
+  }).catch(function(){ toast("That reply code could not be read."); });
+}
+function csvCell(v){
+  v=String(v==null?"":v);
+  return /[",\n\r]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
+}
+function exportCSV(){
+  var l=loadGuests();
+  if(!l.length){ toast("Nothing to export yet."); return; }
+  var rows=[["Name","Reply","How many","Allergies","Note"]].concat(l.map(function(g){
+    return [g.n,statusWord(g.s),(Number(g.c)||0),g.a||"",g.m||""];
+  }));
+  var csv=rows.map(function(r){ return r.map(csvCell).join(","); }).join("\r\n");
+  /* the BOM is what stops Excel mangling accented names */
+  saveBlob(slug()+"-guest-list.csv", new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"}));
+  toast("CSV saved.");
+}
+function copySummary(){
+  var l=loadGuests(), yes=0, may=0, nope=0;
+  l.forEach(function(g){ var n=Number(g.c)||0;
+    if(g.s==="Y") yes+=n; else if(g.s==="M") may+=n; else nope+=n; });
+  var out=[title(), fmtDate(startDate())+" \u00b7 "+timeRange(), "",
+    "Coming: "+yes+" across "+l.filter(function(g){return g.s==="Y";}).length+" replies",
+    "Maybe: "+may,
+    "Cannot come: "+nope];
+  var alg=l.filter(function(g){ return g.a; });
+  if(alg.length){
+    out.push("","Allergies:");
+    alg.forEach(function(g){ out.push("  "+g.n+" \u2014 "+g.a); });
+  }
+  var text=out.join("\n");
+  if(navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(text).then(function(){ toast("Summary copied."); },
+                                            function(){ toast("Could not copy."); });
+  else toast("Could not copy in this browser.");
+}
+function makeBackup(){
+  packAny(loadGuests()).then(function(r){
+    var code="ie1."+r.s;
+    $("h-restore").value=code;
+    if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code);
+    toast("Backup code made and copied. Text it to yourself.");
+  });
+}
+function doRestore(){
+  var m=($("h-restore").value||"").match(/ie1\.([A-Za-z0-9_-]+)/);
+  if(!m){ toast("That does not look like a backup code."); return; }
+  unpackAny(m[1]).then(function(l){
+    if(!Array.isArray(l)) throw new Error("bad");
+    saveGuests(l); clearHostForm(); renderHost();
+    toast("Restored "+l.length+" "+(l.length===1?"reply":"replies")+".");
+  }).catch(function(){ toast("That backup code could not be read."); });
+}
+function bindHost(){
+  $("h-read").onclick=readPaste;
+  $("h-add").onclick=addGuest;
+  $("h-cancel").onclick=clearHostForm;
+  $("h-csv").onclick=exportCSV;
+  $("h-summary").onclick=copySummary;
+  $("h-backup").onclick=makeBackup;
+  $("h-dorestore").onclick=doRestore;
+  $("h-clear").onclick=function(){
+    if(!loadGuests().length){ toast("The list is already empty."); return; }
+    if(window.confirm("Clear every reply for this event? A backup code is the only way back."))
+      { saveGuests([]); clearHostForm(); renderHost(); toast("List cleared."); }
+  };
+  clearHostForm();
+  renderHost();
+}
+
+function bindEditor(){
+  var sel=$("f-theme");
+  for(var key in THEMES){
+    var o=document.createElement("option"); o.value=key; o.textContent=THEMES[key].label; sel.appendChild(o);
+  }
+  writeForm();
+  $("f-base").value=location.href.split("#")[0];
+
+  ["f-theme","f-eyebrow","f-name","f-head","f-tag","f-start","f-dur","f-venue","f-city",
+   "f-notes","f-host","f-by","f-phone","f-email","f-form","rv-text","rv-email","rv-form"]
+   .forEach(function(id){
+     var el=$(id); if(!el) return;
+     el.addEventListener("input",readForm);
+     el.addEventListener("change",readForm);
+   });
+
+  $("b-link").onclick=function(){ buildLink().then(function(){ toast("Link built."); }); };
+  $("b-copy").onclick=function(){
+    var go=function(l){
+      function fallback(){ $("linkout").select(); document.execCommand("copy"); toast("Copied."); }
+      if(navigator.clipboard&&navigator.clipboard.writeText)
+        navigator.clipboard.writeText(l).then(function(){toast("Copied.");},fallback);
+      else fallback();
+    };
+    lastLink ? go(lastLink) : buildLink().then(go);
+  };
+  $("b-open").onclick=function(){
+    var go=function(l){ window.open(l,"_blank","noopener"); };
+    lastLink ? go(lastLink) : buildLink().then(go);
+  };
+  $("b-host").onclick=function(){
+    /* the parent's tracker is just their own invitation link with &host=1 */
+    var go=function(l){ window.open(l+"&host=1","_blank","noopener"); };
+    lastLink ? go(lastLink) : buildLink().then(go);
+  };
+  $("b-qr").onclick=function(){
+    var big=document.createElement("canvas");
+    if(!QR.draw(big,lastLink,1400)){ toast("That link is too long for a QR code."); return; }
+    big.toBlob(function(b){ saveBlob(slug()+"-qr.png",b); toast("QR saved."); },"image/png");
+  };
+  $("b-png").onclick=function(){ savePNG(ART_W,ART_H,"-share","Share image"); };
+  $("b-print-png").onclick=function(){ savePNG(1500,2100,"-print-5x7-300dpi","Print file"); };
+  $("b-video").onclick=recordVideo;
+  $("b-html").onclick=exportHTML;
+  $("b-ics").onclick=function(){ saveBlob(slug()+".ics", new Blob([icsText()],{type:"text/calendar"})); };
+  $("b-gcal").onclick=function(){ window.open(gcalUrl(),"_blank","noopener"); };
+  $("b-print").onclick=function(){ window.print(); };
+  $("b-play").onclick=playPreview;
+  $("b-playclose").onclick=stopPreview;
+  $("playwrap").onclick=function(e){ if(e.target===$("playwrap")) stopPreview(); };
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape") stopPreview(); });
+
+  diagnostics();
+}
+function start(){
+  bindGuest();
+  if(MODE==="guest") toGuest();
+  else if(MODE==="host"){ toHost(); bindHost(); }
+  else bindEditor();
+  render();
+  timer=setInterval(tick,1000);
+  if(document.fonts && document.fonts.ready)
+    document.fonts.ready.then(function(){ if(MODE==="edit"){ diagnostics(); drawQR(); } });
+}
+
+/* Precedence: a link payload, then a baked-in standalone file, then defaults.
+   Adding &edit=1 to a link reopens the editor on it. */
+var frag=location.hash.replace(/^#/,""), params={};
+frag.split("&").forEach(function(p){
+  var i=p.indexOf("="); if(i<0){ params[p]=""; return; }
+  params[decodeURIComponent(p.slice(0,i))]=decodeURIComponent(p.slice(i+1));
+});
+
+if(params.i){
+  unpack(params.i).then(function(o){
+    for(var k in o) S[k]=o[k];
+    if("host" in params) MODE="host";
+    else if(!("edit" in params)) MODE="guest";
+    start();
+  }).catch(function(err){
+    toast("That link could not be read: "+err.message);
+    start();
+  });
+} else if(INJECTED){
+  for(var ik in INJECTED) S[ik]=INJECTED[ik];
+  if("host" in params) MODE="host";
+  else if(!("edit" in params)) MODE="guest";
+  start();
+} else {
+  start();
+}
+})();
+</script>
+</body>
+</html>

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Invitation Engine</title>
+<meta name="description" content="A single page that makes a digital invitation. The invitation travels inside the link, so nothing about your event is stored on a server.">
 <!--
   INVITATION ENGINE v1
   ====================
@@ -386,6 +387,26 @@ progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
   </section>
 </div>
 
+
+<!-- ============================== LANDING ==============================
+     What the bare address shows. The editor is one fragment away at /#edit,
+     which is the link that goes in the download. -->
+<div id="landing" class="hide">
+  <section class="panel">
+    <h2>Invitation Engine</h2>
+    <p class="hint">Fill in an invitation, get a link, and send it. Beside it you get a
+       share image, a print-ready file at 5 &times; 7, and an animated video.</p>
+    <p class="hint">The whole invitation travels <em>inside</em> the link, in the part after
+       the <code>#</code> that browsers never send to a server. Nothing about your event
+       &mdash; a name, an address, a time &mdash; is stored anywhere, including here.
+       The card on this page is a live sample.</p>
+    <div class="btns">
+      <button class="accent" id="l-edit" type="button">Open the editor</button>
+    </div>
+    <p class="note">Bought one of these? Your download has this link with
+       <code>#edit</code> on the end.</p>
+  </section>
+</div>
 
 <!-- ======================= PARENT SIDE (guest list) ======================= -->
 <div id="hostview" class="hide">
@@ -1068,7 +1089,7 @@ function render(){
   var send=$("g-send");
   if(send) send.textContent = (S.rsvp==="form" && S.form) ? "Send RSVP"
                             : S.rsvp==="email" ? "Send by email" : "Send by text";
-  document.title = title();
+  document.title = (MODE==="landing") ? "Invitation Engine" : title();
   tick();
   if(MODE==="edit") drawQR();
 }
@@ -1492,6 +1513,14 @@ window.ENGINE = {
 };
 
 /* =================================================================== boot */
+function toLanding(){
+  MODE="landing";
+  var ed=$("editor");       if(ed) ed.remove();
+  var pb=$("previewbtns");  if(pb) pb.remove();
+  var ga=$("guestActions"); if(ga) ga.remove();   /* a demo card should not offer to text a stranger */
+  $("landing").classList.remove("hide");
+  $("l-edit").onclick=function(){ location.hash="edit"; location.reload(); };
+}
 function toHost(){
   MODE="host";
   var ed=$("editor");        if(ed) ed.remove();
@@ -1822,6 +1851,7 @@ function start(){
   bindGuest();
   if(MODE==="guest") toGuest();
   else if(MODE==="host"){ toHost(); bindHost(); }
+  else if(MODE==="landing") toLanding();
   else bindEditor();
   render();
   timer=setInterval(tick,1000);
@@ -1853,6 +1883,7 @@ if(params.i){
   else if(!("edit" in params)) MODE="guest";
   start();
 } else {
+  if(!("edit" in params)) MODE="landing";
   start();
 }
 })();

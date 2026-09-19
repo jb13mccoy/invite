@@ -1,0 +1,48 @@
+# Publishing the site from the repository itself.
+#
+# The Settings toggle needs a credential nobody here should be handling, so the
+# deploy runs as the repository instead. `enablement: true` switches Pages on
+# the first time this runs, which is the whole reason this workflow exists
+# rather than a one-line branch setting.
+#
+# The site is three static files, so there is nothing to build: the repository
+# root is uploaded as-is.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it midway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Turn Pages on if it is not already
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

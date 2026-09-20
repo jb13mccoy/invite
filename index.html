@@ -69,6 +69,19 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--ui);
   .wrap{grid-template-columns:minmax(0,1fr);padding:16px 16px 70px;gap:18px}
   #stage{order:-1}
 }
+/* The card follows the form down the page while you edit. align-self:start is
+   what gives sticky somewhere to work inside a grid - a stretched item is
+   already as tall as its row and has nowhere to travel. The stage can also be
+   taller than a short viewport, so it scrolls inside itself rather than
+   pinning its own bottom permanently out of reach. The padding/margin pair
+   cancel out, and exist only so the card's shadow is not clipped by the
+   scroll box. Two columns only: below 980px the card is already above the
+   form. */
+@media (min-width:981px){
+  #stage{position:sticky;top:22px;align-self:start;
+    max-height:calc(100vh - 44px);overflow:auto;overscroll-behavior:contain;
+    padding:8px;margin:-8px;scrollbar-width:thin}
+}
 
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   padding:20px 22px;box-shadow:var(--shadow-sm);margin-bottom:16px}

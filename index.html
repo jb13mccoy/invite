@@ -31,7 +31,7 @@
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Baloo+2:wght@400;600;700&family=Cinzel+Decorative:wght@400;700&family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=Fredoka:wght@400;600;700&family=Inter:wght@400;500;600;700&family=Karla:wght@400;600;700&family=Nunito:wght@400;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Baloo+2:wght@400;600;700&family=Cinzel+Decorative:wght@400;700&family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=Fredoka:wght@400;600;700&family=Inter:wght@400;500;600;700&family=Karla:wght@400;600;700&family=Marcellus&family=Nunito:wght@400;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap">
 <style>
 /* ============================================================== chrome
    The editor around the invitation. Warm neutrals so that every colour the
@@ -830,6 +830,7 @@ var GLYPH = {
   moon:    "M15.8 2a10 10 0 1 0 0 20 8.4 8.4 0 0 1 0-20z",
   heart:   "M12 21.2C3.9 14.1 2.2 9.4 5 6.4c2.6-2.8 5.7-1 7 1.2 1.3-2.2 4.4-4 7-1.2 2.8 3 1.1 7.7-7 14.8z",
   leaf:    "M12 1.6c5.6 5.4 5.6 13.4 0 20.8-5.6-7.4-5.6-15.4 0-20.8z",
+  bloom:   "M12 12Q16.3 6.6 12 2.4Q7.7 6.6 12 12ZM12 12Q18.46 14.42 21.13 9.03Q15.81 6.24 12 12ZM12 12Q11.7 18.9 17.64 19.77Q18.65 13.84 12 12ZM12 12Q5.35 13.84 6.36 19.77Q12.3 18.9 12 12ZM12 12Q8.19 6.24 2.87 9.03Q5.54 14.42 12 12Z",
   /* The ball is one path with the seams as counter-shapes, so it still works
      as a single <path d> in both renderers - it just needs the even-odd rule. */
   ball:    "M12 1a11 11 0 1 0 0 22a11 11 0 1 0 0-22z"+
@@ -888,6 +889,12 @@ var THEMES = {
     a:["#6B8A59","#B08447","#8FA98A"], motif:["leaf","dot"], orn:"leaf",
     display:'"Cormorant Garamond",Georgia,"Times New Roman",serif', displayFamily:"Cormorant Garamond",
     body:'"Karla",system-ui,-apple-system,sans-serif',              bodyFamily:"Karla" },
+
+  boho:{ label:"Boho · terracotta and wildflower",
+    bg:["#F7F1E6","#EFE5D4","#E4D5BE"], ink:"#4A4039", paper:"#FBF6EC",
+    a:["#C1684A","#8A9A7B","#D89878"], motif:["bloom","leaf","dot"], orn:"bloom",
+    display:'"Marcellus",Georgia,"Times New Roman",serif', displayFamily:"Marcellus",
+    body:'"Karla",system-ui,-apple-system,sans-serif',     bodyFamily:"Karla" },
 
   midnight:{ label:"Midnight · grown-up and gold",
     bg:["#0E1018","#171B26","#222838"], ink:"#F0EAE0", paper:"#141822",

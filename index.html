@@ -1845,11 +1845,33 @@ window.ENGINE = {
 /* =================================================================== boot */
 function toLanding(){
   MODE="landing";
-  var ed=$("editor");       if(ed) ed.remove();
-  var pb=$("previewbtns");  if(pb) pb.remove();
-  var ga=$("guestActions"); if(ga) ga.remove();   /* a demo card should not offer to text a stranger */
+  /* Hidden, not removed. The editor has to come back when someone presses
+     "Open the editor", and rebuilding it from scratch means reloading the
+     document - which does not work when the page was opened straight off
+     disk. That is exactly how the standalone .html export is used, so the
+     landing page must never depend on a reload. */
+  var ed=$("editor");       if(ed) ed.classList.add("hide");
+  var pb=$("previewbtns");  if(pb) pb.classList.add("hide");
+  var ga=$("guestActions"); if(ga) ga.classList.add("hide");  /* a demo card should not offer to text a stranger */
   $("landing").classList.remove("hide");
-  $("l-edit").onclick=function(){ location.hash="edit"; location.reload(); };
+  $("l-edit").onclick=toEditor;
+}
+
+/* Landing -> editor, in place. The hash is still set so the URL stays
+   bookmarkable and Build link reads the right base, but nothing reloads. */
+function toEditor(){
+  MODE="edit";
+  $("landing").classList.add("hide");
+  var ed=$("editor");       if(ed) ed.classList.remove("hide");
+  var pb=$("previewbtns");  if(pb) pb.classList.remove("hide");
+  var ga=$("guestActions"); if(ga) ga.classList.remove("hide");
+  if(location.hash.indexOf("edit")<0){
+    try { location.hash="edit"; } catch(e){}   /* harmless if the URL refuses it */
+  }
+  bindEditor();
+  render();
+  if(document.fonts && document.fonts.ready)
+    document.fonts.ready.then(function(){ diagnostics(); drawQR(); });
 }
 function toHost(){
   MODE="host";
@@ -2128,7 +2150,10 @@ function bindHost(){
   renderHost();
 }
 
+var editorBound=false;
 function bindEditor(){
+  if(editorBound) return;      /* reachable from start() and from toEditor() */
+  editorBound=true;
   var sel=$("f-theme");
   for(var key in THEMES){
     var o=document.createElement("option"); o.value=key; o.textContent=THEMES[key].label; sel.appendChild(o);

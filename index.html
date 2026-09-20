@@ -241,6 +241,29 @@ progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
 .card[data-layout="arch"] .orn i{display:none}
 .card[data-layout="arch"] .orn svg{width:26px;height:26px}
 
+/* ---- the envelope cover. It sits over the whole card until the guest opens
+   it. The paths are written by ENVELOPE(), the same strings paintEnvelope()
+   hands to Path2D, so the cover the guest taps and the cover in the exported
+   video cannot drift apart - the rule the glyphs already follow. */
+#envwrap{position:absolute;inset:0;z-index:6;cursor:pointer;
+  background:linear-gradient(158deg,var(--bg1) 0%,var(--bg2) 54%,var(--bg3) 100%);
+  transition:opacity .75s ease,transform .75s ease}
+#envwrap[hidden]{display:none}
+#envwrap svg{position:absolute;inset:0;width:100%;height:100%}
+#envwrap #envopen{position:absolute;left:50%;bottom:7%;transform:translateX(-50%);
+  background:var(--paper);border:1px solid var(--ink-rule);color:var(--ink);
+  font-family:var(--body);font-weight:600;font-size:13.5px;letter-spacing:.04em;
+  padding:9px 18px;border-radius:99px;cursor:pointer;
+  box-shadow:0 2px 10px rgba(0,0,0,.10)}
+/* The flap turns about its top edge. A Y flip is the same trick paintEnvelope
+   uses with cos(), so both renderers swing it the same way. */
+#env-flapg{transform-box:view-box;transform-origin:540px var(--env-hinge,385px);
+  transition:transform .85s cubic-bezier(.32,.8,.3,1)}
+#env-seal{transition:opacity .3s ease}
+#envwrap.go{opacity:0;transform:scale(1.06);pointer-events:none}
+#envwrap.go #env-flapg{transform:scaleY(-1)}
+#envwrap.go #env-seal{opacity:0}
+
 #countdown{display:flex;gap:9px;justify-content:center;margin:0 20px 4px;list-style:none;padding:0}
 #countdown li{background:var(--paper);border-radius:9px;padding:8px 4px;text-align:center;
   flex:1;max-width:76px;box-shadow:0 1px 6px rgba(0,0,0,.08)}
@@ -300,6 +323,11 @@ progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
     <select id="f-theme"></select>
     <label for="f-layout">Layout</label>
     <select id="f-layout"></select>
+    <label>Envelope</label>
+    <div class="seg">
+      <label><input type="radio" name="env" value="1" id="ev-on"><span>Opens with an envelope</span></label>
+      <label><input type="radio" name="env" value="0" id="ev-off"><span>Straight to the card</span></label>
+    </div>
   </section>
 
   <section class="panel">
@@ -527,6 +555,10 @@ progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
         <div class="btns"><button class="go" type="submit" id="g-send">Send</button></div>
         <p class="note" id="g-stat"></p>
       </form>
+    </div>
+    <div id="envwrap" class="noprint" hidden>
+      <svg id="envsvg" viewBox="0 0 1080 1350" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
+      <button id="envopen" type="button">Tap to open</button>
     </div>
   </article>
   <div class="btns noprint" id="previewbtns" style="justify-content:center">
@@ -955,6 +987,7 @@ var LAYOUTS = {
 var DEFAULTS = {
   theme:"confetti",
   layout:"classic",
+  env:"1",
   eyebrow:"You are invited to",
   name:"AVA",
   head:"turns eight",
@@ -975,9 +1008,11 @@ var DEFAULTS = {
    every link already sitting in a customer's text messages. */
 var ORDER = ["theme","eyebrow","name","head","tag","start","dur","venue","city",
              "notes","host","phone","email","by","rsvp","form",
-             "layout"];   /* appended 20 Sep 2026. A link written before that
-                             date carries 16 entries; index 16 comes back
-                             undefined and S keeps DEFAULTS.layout. */
+             "layout","env"];   /* appended 20 Sep 2026. A link written
+                             before that date is short by these entries, they
+                             come back undefined, and S keeps the DEFAULTS.
+                             Old invitations therefore gain the envelope -
+                             that is the point of one shared engine. */
 var SCHEMA = 1;
 
 var S = {};
@@ -1446,6 +1481,117 @@ function paint(ctx,W,H,t){
   ctx.restore();
 }
 
+/* ============================================================= envelope
+   One envelope, described once. Every part is an SVG path string in artboard
+   coordinates: the DOM drops them into <path d>, the canvas hands them to
+   Path2D. Same discipline as GLYPH, same reason - the cover a guest taps and
+   the cover in the MP4 have to be the same object.                        */
+function ENVELOPE(){
+  var w=880, h=620, x=(ART_W-w)/2, y=(ART_H-h)/2+20, r=18, cx=x+w/2;
+  var apex=y+h*0.56, lip=y+h*0.34, vee=y+h*0.72;
+  function box(x,y,w,h,r){
+    return "M"+(x+r)+" "+y+"H"+(x+w-r)+"a"+r+" "+r+" 0 0 1 "+r+" "+r+
+           "V"+(y+h-r)+"a"+r+" "+r+" 0 0 1 "+(-r)+" "+r+
+           "H"+(x+r)+"a"+r+" "+r+" 0 0 1 "+(-r)+" "+(-r)+
+           "V"+(y+r)+"a"+r+" "+r+" 0 0 1 "+r+" "+(-r)+"Z";
+  }
+  return { x:x, y:y, w:w, h:h, cx:cx, hinge:y, sealY:apex,
+    body:box(x,y,w,h,r),
+    flap:"M"+x+" "+y+"H"+(x+w)+"L"+cx+" "+apex+"Z",
+    front:"M"+x+" "+lip+"L"+cx+" "+vee+"L"+(x+w)+" "+lip+
+          "V"+(y+h-r)+"a"+r+" "+r+" 0 0 1 "+(-r)+" "+r+
+          "H"+(x+r)+"a"+r+" "+r+" 0 0 1 "+(-r)+" "+(-r)+"Z" };
+}
+function envOn(){ return S.env!=="0"; }
+
+/* Colours and sizes for the envelope, in one place. Without this the canvas
+   and the DOM each carry their own copy and drift the first time a theme
+   changes - the failure ENVELOPE() and GLYPH already exist to prevent. */
+function envSkin(th){
+  return { body:th.paper, flap:th.paper, front:hexA(th.a[0],0.18),
+           edge:hexA(th.ink,0.22), seal:th.a[0], sealInk:th.paper,
+           sealR:62, sealGlyph:40, line:2.5 };
+}
+
+/* u runs 0..1 across the cover alone. The card underneath is already being
+   painted by paintFrame, so this only has to open and then clear out. */
+function paintEnvelope(ctx,W,H,u){
+  var th=THEMES[S.theme]||THEMES.confetti, E=ENVELOPE(), k=W/ART_W;
+  var fade=1-stage(u,0.62,1);
+  if(fade<=0) return;
+  var open=ease(stage(u,0.22,0.62)), seal=1-stage(u,0.16,0.34);
+  var grow=1+0.12*ease(stage(u,0,1));
+
+  ctx.save();
+  ctx.globalAlpha=fade;
+  ctx.translate(W/2,H/2); ctx.scale(k*grow,k*grow); ctx.translate(-ART_W/2,-ART_H/2);
+
+  var K=envSkin(th), bp=new Path2D(E.body);
+  ctx.fillStyle=K.body;
+  ctx.shadowColor="rgba(0,0,0,.22)"; ctx.shadowBlur=40; ctx.shadowOffsetY=14;
+  ctx.fill(bp);
+  ctx.shadowColor="transparent"; ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+  ctx.strokeStyle=K.edge; ctx.lineWidth=K.line; ctx.stroke(bp);
+
+  /* The flap turns about its top edge; cos() carries it from lying closed
+     (+1) to standing open behind the envelope (-1). */
+  ctx.save();
+  ctx.translate(0,E.hinge); ctx.scale(1,Math.cos(Math.PI*open)); ctx.translate(0,-E.hinge);
+  var fp=new Path2D(E.flap);
+  ctx.fillStyle=K.flap; ctx.fill(fp);
+  ctx.strokeStyle=K.edge; ctx.lineWidth=K.line; ctx.stroke(fp);
+  ctx.restore();
+
+  var frp=new Path2D(E.front);
+  ctx.fillStyle=K.front; ctx.fill(frp);
+  ctx.strokeStyle=K.edge; ctx.lineWidth=K.line; ctx.stroke(frp);
+
+  if(seal>0){
+    ctx.globalAlpha=fade*seal;
+    ctx.beginPath(); ctx.arc(E.cx,E.sealY,K.sealR,0,Math.PI*2);
+    ctx.fillStyle=K.seal; ctx.fill();
+    glyph(ctx,GLYPH[th.orn],E.cx,E.sealY,K.sealGlyph,0,K.sealInk,1,GLYPH_RULE[th.orn]);
+  }
+  ctx.restore();
+}
+
+/* The whole sequence. The card's own reveal starts while the cover is still
+   clearing, so the two overlap rather than cutting. savePNG never comes
+   through here - a still is the card, never the envelope. */
+function paintFrame(ctx,W,H,u){
+  if(!envOn()){ paint(ctx,W,H,u); return; }
+  paint(ctx,W,H,stage(u,0.30,1));
+  if(u<0.55) paintEnvelope(ctx,W,H,u/0.55);
+}
+
+/* The DOM cover, built from the same strings. */
+function buildEnvelope(){
+  var wrap=$("envwrap"); if(!wrap) return;
+  var th=THEMES[S.theme]||THEMES.confetti, E=ENVELOPE(), K=envSkin(th);
+  wrap.style.setProperty("--env-hinge",E.hinge+"px");
+  $("envsvg").innerHTML=
+    '<path d="'+E.body+'" fill="'+K.body+'" stroke="'+K.edge+'" stroke-width="'+K.line+'"/>'+
+    '<g id="env-flapg"><path d="'+E.flap+'" fill="'+K.flap+
+      '" stroke="'+K.edge+'" stroke-width="'+K.line+'"/></g>'+
+    '<path d="'+E.front+'" fill="'+K.front+
+      '" stroke="'+K.edge+'" stroke-width="'+K.line+'"/>'+
+    '<g id="env-seal"><circle cx="'+E.cx+'" cy="'+E.sealY+'" r="'+K.sealR+'" fill="'+K.seal+'"/>'+
+      '<g transform="translate('+E.cx+','+E.sealY+') scale('+(K.sealGlyph/24).toFixed(4)+
+      ') translate(-12,-12)"><path d="'+GLYPH[th.orn]+'" fill="'+K.sealInk+
+      '" fill-rule="'+(GLYPH_RULE[th.orn]||"nonzero")+'"/></g></g>';
+}
+function showEnvelope(){
+  var wrap=$("envwrap"); if(!wrap) return;
+  buildEnvelope();
+  wrap.hidden=false; wrap.classList.remove("go");
+  void wrap.offsetWidth;            /* restart the transition */
+}
+function openEnvelope(){
+  var wrap=$("envwrap"); if(!wrap||wrap.hidden) return;
+  wrap.classList.add("go");
+  setTimeout(function(){ wrap.hidden=true; },900);
+}
+
 /* Canvas draws text with whatever font is resolved at that instant, so the
    web font has to be in memory before the first stroke or the export silently
    falls back and looks nothing like the card on screen. */
@@ -1499,10 +1645,10 @@ function recordVideo(){
   if(!mime){ toast("This browser cannot record video. The PNG and print files still work."); return; }
   $("b-video").disabled=true;
   ensureFonts().then(function(){
-    var W=ART_W,H=ART_H,FPS=30,ANIM=4200,HOLD=2200,TOTAL=ANIM+HOLD;
+    var W=ART_W,H=ART_H,FPS=30,ANIM=envOn()?5800:4200,HOLD=2200,TOTAL=ANIM+HOLD;
     var c=document.createElement("canvas"); c.width=W; c.height=H;
     var ctx=c.getContext("2d");
-    paint(ctx,W,H,0);                       /* a first frame, or the stream starts empty */
+    paintFrame(ctx,W,H,0);                  /* a first frame, or the stream starts empty */
     var rec=new MediaRecorder(c.captureStream(FPS),{mimeType:mime,videoBitsPerSecond:8000000});
     var chunks=[];
     rec.ondataavailable=function(e){ if(e.data && e.data.size) chunks.push(e.data); };
@@ -1520,7 +1666,7 @@ function recordVideo(){
     var t0=performance.now();
     (function frame(now){
       var el=now-t0;
-      paint(ctx,W,H,Math.min(1,el/ANIM));
+      paintFrame(ctx,W,H,Math.min(1,el/ANIM));
       $("recprog").value=Math.min(100, el/TOTAL*100);
       if(el<TOTAL) requestAnimationFrame(frame); else rec.stop();
     })(t0);
@@ -1532,11 +1678,11 @@ function playPreview(){
   $("playwrap").classList.add("on");
   playing=true;
   ensureFonts().then(function(){
-    var ANIM=4200, HOLD=1400, t0=performance.now();
+    var ANIM=envOn()?5800:4200, HOLD=1400, t0=performance.now();
     (function frame(now){
       if(!playing) return;
       var el=now-t0;
-      paint(ctx,ART_W,ART_H,Math.min(1,el/ANIM));
+      paintFrame(ctx,ART_W,ART_H,Math.min(1,el/ANIM));
       if(el<ANIM+HOLD) requestAnimationFrame(frame); else playing=false;
     })(t0);
   });
@@ -1620,6 +1766,7 @@ function readForm(){
   S.notes=$("f-notes").value; S.host=$("f-host").value; S.by=$("f-by").value;
   S.phone=$("f-phone").value; S.email=$("f-email").value; S.form=$("f-form").value;
   S.rsvp = $("rv-email").checked ? "email" : $("rv-form").checked ? "form" : "text";
+  S.env  = $("ev-off").checked ? "0" : "1";
   $("formwrap").classList.toggle("hide", S.rsvp!=="form");
   render();
 }
@@ -1631,6 +1778,7 @@ function writeForm(){
   $("f-notes").value=S.notes; $("f-host").value=S.host; $("f-by").value=S.by;
   $("f-phone").value=S.phone; $("f-email").value=S.email; $("f-form").value=S.form;
   $("rv-"+(S.rsvp||"text")).checked=true;
+  $("ev-"+(S.env==="0"?"off":"on")).checked=true;
   $("formwrap").classList.toggle("hide", S.rsvp!=="form");
 }
 function diagnostics(){
@@ -1961,7 +2109,8 @@ function bindEditor(){
   $("f-base").value=location.href.split("#")[0];
 
   ["f-theme","f-layout","f-eyebrow","f-name","f-head","f-tag","f-start","f-dur","f-venue","f-city",
-   "f-notes","f-host","f-by","f-phone","f-email","f-form","rv-text","rv-email","rv-form"]
+   "f-notes","f-host","f-by","f-phone","f-email","f-form","rv-text","rv-email","rv-form",
+   "ev-on","ev-off"]
    .forEach(function(id){
      var el=$(id); if(!el) return;
      el.addEventListener("input",readForm);
@@ -2008,11 +2157,15 @@ function bindEditor(){
 }
 function start(){
   bindGuest();
+  var ew=$("envwrap"); if(ew) ew.addEventListener("click",openEnvelope);
   if(MODE==="guest") toGuest();
   else if(MODE==="host"){ toHost(); bindHost(); }
   else if(MODE==="landing") toLanding();
   else bindEditor();
   render();
+  /* Guests meet the envelope; the host editing the card does not want a
+     cover in the way, and sees it in the animation preview instead. */
+  if(MODE==="guest" && envOn()) showEnvelope();
   timer=setInterval(tick,1000);
   if(document.fonts && document.fonts.ready)
     document.fonts.ready.then(function(){ if(MODE==="edit"){ diagnostics(); drawQR(); } });

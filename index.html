@@ -379,6 +379,10 @@ progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
       <input id="f-form" type="text" placeholder="https://formspree.io/f/xxxxxxx">
       <p class="note">Formspree, Basin and Getform all have free tiers that accept this directly.</p>
     </div>
+    <label for="f-reg" style="margin-top:14px">Gift registry or wishlist</label>
+    <input id="f-reg" type="text" placeholder="https://&hellip;">
+    <p class="note">Optional. Adds a button to the invitation. Leave it empty and no
+       button appears.</p>
   </section>
 
   <section class="panel">
@@ -396,6 +400,13 @@ progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
     <label for="linkout" style="margin-top:14px">Your link</label>
     <textarea id="linkout" readonly spellcheck="false"></textarea>
     <p class="note" id="linkstat">Press <b>Build link</b> to generate it.</p>
+    <label style="margin-top:14px">Send it</label>
+    <div class="btns" id="sharebtns">
+      <button id="b-share" type="button" hidden>Share&hellip;</button>
+      <button id="b-sms" type="button">Text</button>
+      <button id="b-wa" type="button">WhatsApp</button>
+      <button id="b-mail" type="button">Email</button>
+    </div>
     <div class="qrrow">
       <canvas id="qr" width="132" height="132"></canvas>
       <div style="flex:1;min-width:0">
@@ -542,6 +553,7 @@ progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
         <button id="a-rsvp" type="button">RSVP</button>
         <button id="a-cal" type="button">Add to calendar</button>
         <button id="a-map" type="button">Directions</button>
+        <button id="a-reg" type="button" class="hide">Gift registry</button>
       </div>
       <form id="rsvpForm" class="hide">
         <label for="g-name">Your name</label><input id="g-name" name="name" type="text" required>
@@ -988,6 +1000,7 @@ var DEFAULTS = {
   theme:"confetti",
   layout:"classic",
   env:"1",
+  reg:"",
   eyebrow:"You are invited to",
   name:"AVA",
   head:"turns eight",
@@ -1008,11 +1021,11 @@ var DEFAULTS = {
    every link already sitting in a customer's text messages. */
 var ORDER = ["theme","eyebrow","name","head","tag","start","dur","venue","city",
              "notes","host","phone","email","by","rsvp","form",
-             "layout","env"];   /* appended 20 Sep 2026. A link written
-                             before that date is short by these entries, they
-                             come back undefined, and S keeps the DEFAULTS.
-                             Old invitations therefore gain the envelope -
-                             that is the point of one shared engine. */
+             "layout","env","reg"];   /* appended 20 Sep 2026. A link
+                             written before that date is short by these
+                             entries, they come back undefined, and S keeps
+                             the DEFAULTS. Old invitations therefore gain the
+                             envelope - the point of one shared engine. */
 var SCHEMA = 1;
 
 var S = {};
@@ -1135,6 +1148,17 @@ function utcStamp(d){
 }
 function address(){ return [S.venue,S.city].filter(Boolean).join(", "); }
 function mapUrl(){ return "https://www.google.com/maps/search/?api=1&query="+encodeURIComponent(address()); }
+/* The registry link rides inside the payload, so it is only ever opened when it
+   is plainly http(s). Anything else - javascript:, data: - is treated as absent
+   and the button simply does not appear. */
+function safeUrl(u){
+  var v=String(u||"").trim();
+  return /^https?:\/\//i.test(v) ? v : "";
+}
+/* One line for every share target, so they cannot say different things. */
+function shareText(){
+  return title()+"\n"+fmtDate(startDate())+", "+timeRange();
+}
 function title(){ return (S.name?S.name+" — ":"")+(S.head||"You are invited"); }
 
 /* ============================================================ RSVP links */
@@ -1237,6 +1261,8 @@ function render(){
   $("v-tag").classList.toggle("hide", !S.tag);
   $("v-map").href=mapUrl();
   $("v-map").classList.toggle("hide", !address());
+  var rg=$("a-reg");
+  if(rg) rg.classList.toggle("hide", !safeUrl(S.reg));
 
   /* The card may have had its action strip removed (parent view), so nothing
      below is assumed to exist. */
@@ -1765,6 +1791,7 @@ function readForm(){
   S.dur=Number($("f-dur").value)||120; S.venue=$("f-venue").value; S.city=$("f-city").value;
   S.notes=$("f-notes").value; S.host=$("f-host").value; S.by=$("f-by").value;
   S.phone=$("f-phone").value; S.email=$("f-email").value; S.form=$("f-form").value;
+  S.reg=$("f-reg").value;
   S.rsvp = $("rv-email").checked ? "email" : $("rv-form").checked ? "form" : "text";
   S.env  = $("ev-off").checked ? "0" : "1";
   $("formwrap").classList.toggle("hide", S.rsvp!=="form");
@@ -1777,6 +1804,7 @@ function writeForm(){
   $("f-dur").value=S.dur; $("f-venue").value=S.venue; $("f-city").value=S.city;
   $("f-notes").value=S.notes; $("f-host").value=S.host; $("f-by").value=S.by;
   $("f-phone").value=S.phone; $("f-email").value=S.email; $("f-form").value=S.form;
+  $("f-reg").value=S.reg||"";
   $("rv-"+(S.rsvp||"text")).checked=true;
   $("ev-"+(S.env==="0"?"off":"on")).checked=true;
   $("formwrap").classList.toggle("hide", S.rsvp!=="form");
@@ -1908,6 +1936,11 @@ function bindGuest(){
   if(cal) cal.onclick=function(){ saveBlob(slug()+".ics", new Blob([icsText()],{type:"text/calendar"})); };
   var mp=$("a-map");
   if(mp) mp.onclick=function(){ window.open(mapUrl(),"_blank","noopener"); };
+  var rg=$("a-reg");
+  if(rg) rg.onclick=function(){
+    var u=safeUrl(S.reg);
+    if(u) window.open(u,"_blank","noopener");
+  };
   var rb=$("a-rsvp");
   if(rb) rb.onclick=function(){
     var f=$("rsvpForm");
@@ -2109,7 +2142,7 @@ function bindEditor(){
   $("f-base").value=location.href.split("#")[0];
 
   ["f-theme","f-layout","f-eyebrow","f-name","f-head","f-tag","f-start","f-dur","f-venue","f-city",
-   "f-notes","f-host","f-by","f-phone","f-email","f-form","rv-text","rv-email","rv-form",
+   "f-notes","f-host","f-by","f-phone","f-email","f-form","f-reg","rv-text","rv-email","rv-form",
    "ev-on","ev-off"]
    .forEach(function(id){
      var el=$(id); if(!el) return;
@@ -2130,6 +2163,40 @@ function bindEditor(){
   $("b-open").onclick=function(){
     var go=function(l){ window.open(l,"_blank","noopener"); };
     lastLink ? go(lastLink) : buildLink().then(go);
+  };
+
+  /* Share targets. Each one builds the link first if it has not been built,
+     so the host never has to remember to press Build link. */
+  function sendVia(make){
+    var go=function(l){ make(l); };
+    lastLink ? go(lastLink) : buildLink().then(go);
+  }
+  if(navigator.share){
+    $("b-share").hidden=false;
+    $("b-share").onclick=function(){
+      sendVia(function(l){
+        navigator.share({title:title(),text:shareText(),url:l})
+          .catch(function(){});        /* the guest cancelling is not an error */
+      });
+    };
+  }
+  $("b-sms").onclick=function(){
+    /* sms:?&body= is the spelling both iOS and Android accept. */
+    sendVia(function(l){
+      location.href="sms:?&body="+encodeURIComponent(shareText()+"\n"+l);
+    });
+  };
+  $("b-wa").onclick=function(){
+    sendVia(function(l){
+      window.open("https://wa.me/?text="+encodeURIComponent(shareText()+"\n"+l),
+                  "_blank","noopener");
+    });
+  };
+  $("b-mail").onclick=function(){
+    sendVia(function(l){
+      location.href="mailto:?subject="+encodeURIComponent(title())+
+                    "&body="+encodeURIComponent(shareText()+"\n\n"+l);
+    });
   };
   $("b-host").onclick=function(){
     /* the parent's tracker is just their own invitation link with &host=1 */
